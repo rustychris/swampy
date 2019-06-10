@@ -1,0 +1,459 @@
+#LyX 2.2 created this file. For more info see http://www.lyx.org/
+\lyxformat 508
+\begin_document
+\begin_header
+\save_transient_properties true
+\origin unavailable
+\textclass article
+\begin_preamble
+\usepackage{titlesec}
+\usepackage{sectsty}
+\usepackage{changepage}
+\usepackage{enumitem}
+
+\usepackage{lastpage}
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0.4pt}
+
+% customize the first page footer
+\fancypagestyle{specialfooter}{%
+  \fancyhf{}
+  \fancyfoot[C]{\thepage\ of \pageref{LastPage}}
+}
+
+% maybe this will make section headings sans serif
+\allsectionsfont{\normalfont\bf\normalsize\sffamily}
+\end_preamble
+\use_default_options false
+\maintain_unincluded_children false
+\language english
+\language_package default
+\inputencoding auto
+\fontencoding global
+\font_roman "default" "Liberation Serif"
+\font_sans "default" "Liberation Sans"
+\font_typewriter "default" "default"
+\font_math "auto" "auto"
+\font_default_family default
+\use_non_tex_fonts true
+\font_sc false
+\font_osf false
+\font_sf_scale 100 100
+\font_tt_scale 100 100
+\graphics default
+\default_output_format pdf5
+\output_sync 0
+\bibtex_command default
+\index_command default
+\paperfontsize 12
+\spacing other 1.1
+\use_hyperref false
+\papersize default
+\use_geometry true
+\use_package amsmath 1
+\use_package amssymb 1
+\use_package cancel 1
+\use_package esint 1
+\use_package mathdots 1
+\use_package mathtools 1
+\use_package mhchem 1
+\use_package stackrel 1
+\use_package stmaryrd 1
+\use_package undertilde 1
+\cite_engine basic
+\cite_engine_type default
+\biblio_style plain
+\use_bibtopic false
+\use_indices false
+\paperorientation portrait
+\suppress_date false
+\justification true
+\use_refstyle 0
+\index Index
+\shortcut idx
+\color #008000
+\end_index
+\leftmargin 2.5cm
+\topmargin 2.5cm
+\rightmargin 2.5cm
+\bottommargin 3.5cm
+\headheight 1cm
+\headsep 1cm
+\footskip 1.5cm
+\secnumdepth 3
+\tocdepth 3
+\paragraph_separation skip
+\defskip medskip
+\quotes_language english
+\papercolumns 1
+\papersides 1
+\paperpagestyle default
+\tracking_changes false
+\output_changes false
+\html_math_output 0
+\html_css_as_file 0
+\html_be_strict false
+\end_header
+
+\begin_body
+
+\begin_layout Standard
+Porosity function
+\begin_inset Formula 
+\[
+P\left(x,y,z\right)=\begin{cases}
+1 & z>-d\left(x,y\right)\\
+0 & z\le-d\left(x,y\right)
+\end{cases}
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Porosity and free surface 
+\begin_inset Formula $h$
+\end_inset
+
+ together yield water depth 
+\begin_inset Formula $H$
+\end_inset
+
+ through integration
+\end_layout
+
+\begin_layout Standard
+Wet area 
+\begin_inset Formula $A_{w}\left(h\right)$
+\end_inset
+
+ defined in horizontal integral for arbitrary elevation 
+\begin_inset Formula $h$
+\end_inset
+
+.
+\end_layout
+
+\begin_layout Standard
+Likewise can integrate to get volume 
+\begin_inset Formula $V\left(h\right)$
+\end_inset
+
+ for a given free surface elevation 
+\begin_inset Formula $h$
+\end_inset
+
+.
+\end_layout
+
+\begin_layout Standard
+Edge area 
+\begin_inset Formula $A_{f}$
+\end_inset
+
+ is defined as a line integral of 
+\begin_inset Formula $H\left(x,y\right)$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Continuity:
+\begin_inset Formula 
+\[
+\frac{V_{i}^{n+1}-V_{i}^{n}}{\Delta t}+\sum_{m=1}^{N_{s}}\sum_{k=1}^{N_{ks}}u_{f,n\left(m,k\right)}^{n+\theta}A_{f\left(m,k\right)}^{uw}N_{m}=0
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $n$
+\end_inset
+
+: time step
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $u_{f,n\left(m,k\right)}$
+\end_inset
+
+: horizontal velocity for side 
+\begin_inset Formula $m$
+\end_inset
+
+, layer 
+\begin_inset Formula $k$
+\end_inset
+
+, normal component
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $A_{f\left(m,k\right)}^{uw}$
+\end_inset
+
+: explicit upwind cross-sectional area side 
+\begin_inset Formula $m$
+\end_inset
+
+, layer 
+\begin_inset Formula $k$
+\end_inset
+
+.
+ 
+\begin_inset Note Note
+status open
+
+\begin_layout Plain Layout
+assume that the upwind part refers only to the free surface used in 
+\begin_inset Formula $A_{f}$
+\end_inset
+
+ calculation.
+\end_layout
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $N_{m}\in\left[-1,1\right]$
+\end_inset
+
+: sign for outward normal of side 
+\begin_inset Formula $m$
+\end_inset
+
+ and cell 
+\begin_inset Formula $i$
+\end_inset
+
+.
+\end_layout
+
+\begin_layout Standard
+Zhang defines 
+\begin_inset Formula $I_{i}$
+\end_inset
+
+ and 
+\begin_inset Formula $N_{c}$
+\end_inset
+
+ related to a subdivision strategy for subgrid.
+ Also goes into linearly sloping bed within each sub-cell (eq.
+ 3.13).
+ Hopefully not needed since we'll probably use the piecewise constant bathymetry
+ approach.
+\end_layout
+
+\begin_layout Standard
+Velocity reconstruction:
+\end_layout
+
+\begin_layout Standard
+Starts with Perot, 2000
+\begin_inset Formula 
+\[
+\overrightarrow{u_{c}}=\frac{1}{V_{c}}\sum_{N_{s}}u_{f,n}d_{f,c}A_{f}\overrightarrow{n_{f}}
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+And then linear interpolation to get 
+\begin_inset Formula $\overrightarrow{u_{f}}$
+\end_inset
+
+ from adjacent 
+\begin_inset Formula $\overrightarrow{u_{c}}$
+\end_inset
+
+.
+\end_layout
+
+\begin_layout Standard
+Note that compared to some ways of writing Perot, this is using cell volume
+ and edge area, as opposed to cell area and edge depth.
+\end_layout
+
+\begin_layout Standard
+3.18 and 3.19 reiterate application of Gauss' theorem to velocity reconstruction
+\end_layout
+
+\begin_layout Standard
+Suggests that for computational efficiency, do not recalculate centroids
+ based on changing volume, just use the original cell centroids.
+\end_layout
+
+\begin_layout Standard
+Momentum: derived by integrating 
+\begin_inset Formula $\nabla\cdot\left(\overrightarrow{u}\overrightarrow{u}\right)$
+\end_inset
+
+ over the control volume.
+\end_layout
+
+\begin_layout Standard
+Carries on in the same way as for velocity, using Perot to get that term
+ to the centers, but here for momentum the faces have the additional 
+\begin_inset Formula $\overrightarrow{u_{f}}$
+\end_inset
+
+ term, which itself came from linear interpolation of the cell center vector
+ velocities.
+ 
+\end_layout
+
+\begin_layout Standard
+So far subgrid it appears that subgrid is really just integrated over, and
+ the reconstructions and momentum terms are defined just a computational
+ edges, not subgrid.
+\end_layout
+
+\begin_layout Standard
+Just after equation 3.32, 
+\begin_inset Formula 
+\[
+\frac{\partial\overrightarrow{u}}{\partial n_{f}}=\pm\frac{\partial\overrightarrow{u}}{\partial z}
+\]
+
+\end_inset
+
+Okay - confused at first, but this is just look at vertical gradients at
+ top/bottom faces of cells.
+ Nothing more to it.
+ Easy.
+\end_layout
+
+\begin_layout Standard
+Through the end of 3.3, it appears to be no-surprises, just writing out these
+ usual steps.
+ 
+\end_layout
+
+\begin_layout Standard
+
+\emph on
+Aside: 
+\emph default
+Looking at the 
+\begin_inset Formula $C_{d,b}$
+\end_inset
+
+ equations 3.51 and 3.53, it strikes me that 3.51 is probably wrong.
+ It assumes that 
+\begin_inset Formula $\overrightarrow{u_{c}}$
+\end_inset
+
+ reflects the velocity at the middle of the control volume, but it is probably
+ more accurate to consider 
+\begin_inset Formula $\overrightarrow{u_{c}}$
+\end_inset
+
+ as the velocity averaged over the height of the cell.
+ The interpretation differs between 
+\begin_inset Formula $u$
+\end_inset
+
+ is used for a flux (dz-averaged) or part of a gradient (point-based).
+\end_layout
+
+\begin_layout Standard
+Equation 3.60 ignores the nonlinearity of the equation in moving from a single
+ water column to subgrid.
+ So he moves on to 3.63 and later.
+ Defines a per-subedge 
+\begin_inset Formula $\beta_{j,k}$
+\end_inset
+
+ which is the barotropic:drag ratio, using local pressure gradient, velocity,
+ depth, and some 
+\begin_inset Formula $C_{d,sum(j,k)}$
+\end_inset
+
+.
+\begin_inset Formula 
+\[
+\beta_{j,k}=\frac{-\frac{1}{\rho}\frac{\partial P}{\partial s}}{C_{d,sum\left(j,k\right)}\frac{\left|u_{j,k}\right|u_{j,k}}{H_{j,k}}}
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Assume that the pressure gradient is uniform across all subedges, then 
+\begin_inset Formula 
+\[
+\left(\frac{\beta_{j,k}C_{d,sum\left(j,k\right)}}{H_{j,k}}\right)^{1/2}
+\]
+
+\end_inset
+
+gives a normalizing factor for subedge velocities.
+ These can be summed, and then used to convert an edge-averaged velocity
+ to sub-edge velocity.
+ This just provides a mechanism to reconstruct edge velocities.
+ This 
+\emph on
+could
+\emph default
+ be used to then calculate an effective drag coefficient for the edge, based
+ on the 
+\begin_inset Formula $\beta$
+\end_inset
+
+ values.
+ But he says this is too expensive, so assume 
+\begin_inset Formula $\beta$
+\end_inset
+
+ is constant per edge.
+ That means that within a single edge you couldn't have some parts that
+ are accelerating and others decelerating.
+ Maybe that's fine.
+\end_layout
+
+\begin_layout Standard
+With that assumption, the edge drag coefficient 
+\begin_inset Formula $C_{d,sum\left(j\right)}$
+\end_inset
+
+ becomes an area and depth weighted average over the sub-edges.
+\end_layout
+
+\begin_layout Standard
+That section wraps up by showing how 
+\begin_inset Formula $C_{d,sum\left(j\right)}$
+\end_inset
+
+is related to 
+\begin_inset Formula $n$
+\end_inset
+
+ or 
+\begin_inset Formula $C_{h}$
+\end_inset
+
+.
+ But that part seems less interesting, and I'm not 100% sure that I buy
+ it yet.
+\end_layout
+
+\end_body
+\end_document

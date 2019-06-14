@@ -21,6 +21,7 @@ from matplotlib.collections import PolyCollection
 from scipy.spatial.distance import euclidean
 from stompy import utils
 from stompy.grid import unstructured_grid as ugrid
+import logging as log
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -435,11 +436,12 @@ class SwampyCore(object):
 
         return lij
 
-    def set_initial_conditions(self):
+    def set_initial_conditions(self,t=0.0):
         """
         Subclasses or caller can specialize this.  Here we just allocate
         the arrays
         """
+        self.t=t
         # Initial free surface elevation, positive up
         self.ic_ei = np.zeros(self.ncells, np.float64)
         # Bed elevation, positive down
@@ -451,92 +453,104 @@ class SwampyCore(object):
         # self.us_j  index array for edge BCs on upstream end
         # need to refactor BC code
 
-    def run(self, tend):
+    def run(self, t_end):
         """
-        Run simulation
+        Initialize and run simulation until time reaches t_end.
         """
-        dt = self.dt
-        self.tend = tend
-        self.t=0.0 # for now, always start at 0.
-        nsteps = np.int(np.round(tend / dt))
+        self.prepare_to_run()
+        return self.run_until(t_end)
 
-        # precompute constants
-        gdt2theta2 = g * dt * dt * self.theta * self.theta
+    def prepare_to_run(self):
+        # initialization of self.t moved to set_initial_condition()
+
+        # PRECOMPUTE CONSTANTS
+        self.gdt2theta2 = g * (self.dt*self.theta)**2 
 
         dc = self.get_cell_center_spacings()
         self.dist = self.edge_to_cen_dist()
         alpha = self.get_alphas_Perot()
-        sil = self.get_sign_array()
+        self.sil = self.get_sign_array()
         # lij = self.get_side_num_of_cell()
 
         # edge length divided by center spacing
         len_dc_ratio = np.divide(self.len, dc)
 
         # cell center values
-        ncells = self.ncells
-        self.hi = hi = np.zeros(ncells, np.float64)  # total depth
-        self.zi = zi = np.zeros_like(hi)  # bed elevation, measured positive down
-        self.ei = ei = np.zeros_like(hi)  # water surface elevation
-        self.vi = vi = np.zeros_like(hi)  # cell volumes
-        self.pi = pi = np.zeros_like(hi)  # cell wetted areas
+        self.hi = np.zeros(self.ncells, np.float64)  # total depth
+        self.zi = np.zeros(self.ncells, np.float64)  # bed elevation, measured positive down
+        self.ei = np.zeros(self.ncells, np.float64)  # water surface elevation
+        self.vi = np.zeros(self.ncells, np.float64)  # cell volumes
+        self.pi = np.zeros(self.ncells, np.float64)  # cell wetted areas
 
         # edge values
-        self.uj = uj = np.zeros(self.nedges, np.float64)  # normal velocity at side
-        self.qj = qj = np.zeros(self.nedges, np.float64)  # normal velocity*h at side
-        self.aj = aj = np.zeros(self.nedges, np.float64)  # edge wet areas
-        cf = np.zeros(self.nedges, np.float64)  # edge friction coefs
-        cfterm = np.zeros(self.nedges, np.float64)  # edge friction coefs - term for matrices
+        self.uj = np.zeros(self.nedges, np.float64)  # normal velocity at side
+        self.qj = np.zeros(self.nedges, np.float64)  # normal velocity*h at side
+        self.aj = np.zeros(self.nedges, np.float64)  # edge wet areas
+        self.cf = np.zeros(self.nedges, np.float64)  # edge friction coefs
+        self.cfterm = np.zeros(self.nedges, np.float64)  # edge friction coefs - term for matrices
 
         # Matrix
         # np.zeros((ncells, ncells), np.float64)  # inner iterations
-        Ai = sparse.dok_matrix( (ncells,ncells),np.float64) 
-        bi = np.zeros(ncells, np.float64)
-        Ao = sparse.dok_matrix( (ncells, ncells), np.float64)  # outer iterations
-        bo = np.zeros(ncells, np.float64)
-        x0 = np.zeros_like(hi)
+        self.Ai = sparse.dok_matrix( (self.ncells,self.ncells),np.float64) 
+        self.bi = np.zeros(self.ncells, np.float64)
+        self.Ao = sparse.dok_matrix( (self.ncells, self.ncells), np.float64)  # outer iterations
+        self.bo = np.zeros(self.ncells, np.float64)
+        self.x0 = np.zeros(self.ncells, np.float64)
 
         # short vars for grid
-        self.area = area = self.grd.cells['_area']
+        self.area = self.grd.cells['_area']
 
         # set initial conditions
-        ei[:] = self.ic_ei[:] # RH: does this need to be propped up to at least -zi?
-        zi[:] = self.ic_zi[:]
-        # RH
-        ei[:] = np.maximum( ei,-self.zi ) 
-
-        self.hi[:] = zi + ei # update total depth. assume ei is valid, so no clippig here.
+        self.zi[:] = self.ic_zi[:]
+        self.ei[:] = np.maximum(self.ic_ei[:],-self.zi) # RH: prop up to at least -zi
+        self.hi[:] = self.zi + self.ei # update total depth. assume ei is valid, so no clipping here.
         assert np.all(self.hi>=0.0)
                       
-        hjstar = self.calc_hjstar(ei, zi, uj)
-        hjbar = self.calc_hjbar(ei, zi)
-        hjtilde = self.calc_hjtilde(ei, zi)
-        vi[:] = self.calc_volume(hi)
-        pi[:] = self.calc_wetarea(hi)
+        self.eta_cells={}
+        self.eta_mask=np.zeros( self.ncells, np.bool8)
+        for bc in self.bcs:
+            if isinstance(bc,StageBC):
+                for c in bc.cells(self):
+                    self.eta_cells[c]=bc # doesn't matter what the value is
+                    self.eta_mask[c]=True
+        log.info("Total of %d stage BC cells"%len(self.eta_cells))
+
+    def run_until(self,t_end):
+        self.t_end = t_end
+        dt=self.dt
+        assert self.t<=t_end,"Request for t_end %s before t %s"%(t_end,t)
+        nsteps = np.int(np.round((t_end - self.t) / dt))
+
+        uj=self.uj
+        ei=self.ei
+        alpha=self.alpha #?
+        sil=self.sil
+        hi=self.hi
+        ncells=self.ncells# ?
+        eta_cells=self.eta_cells
+        cfterm=self.cfterm
+
+        hjstar = self.calc_hjstar(self.ei, self.zi, self.uj)
+        hjbar = self.calc_hjbar(self.ei, self.zi)
+        hjtilde = self.calc_hjtilde(self.ei, self.zi)
+        self.vi[:] = self.calc_volume(self.hi)
+        self.pi[:] = self.calc_wetarea(self.hi)
         # RH: this had been using hjbar, but that leads to issues with
         # wetting and drying. hjstar I think is more appropriate, and in
         # fact hjstar is used in the loop, just not in Ai.
         # this clears up bad updates to ei
         # a lot of this is duplicated at the end of the time loop.
         # would be better to rearrange to avoid that duplication.
-        aj[:] = self.calc_edge_wetarea(hjstar)
-        cf[:] = self.calc_edge_friction(uj, aj, hjbar)
-        cfterm[:] = 1. / (1. + self.dt * cf[:])
-
-        eta_cells={}
-        eta_mask=np.zeros( ncells, np.bool8)
-        for bc in self.bcs:
-            if isinstance(bc,StageBC):
-                for c in bc.cells(self):
-                    eta_cells[c]=bc # doesn't matter what the value is
-                    eta_mask[c]=True
-        print("Total of %d stage BC cells"%len(eta_cells))
-
+        self.aj[:] = self.calc_edge_wetarea(hjstar)
+        self.cf[:] = self.calc_edge_friction(self.uj, self.aj, hjbar)
+        self.cfterm[:] = 1. / (1. + self.dt * self.cf[:])
+        
         # change code to vector operations at some point
         # time stepping loop
         tvol = np.zeros(nsteps)
         for n in range(nsteps):
-            self.t=n*dt # update model time
-            print('step %d/%d  t=%.3fs'%(n+1,nsteps,self.t))
+            self.t+=dt # update model time
+            log.info('step %d/%d  t=%.3fs'%(n+1,nsteps,self.t))
 
             # G: explicit baroptropic term, advection term
             fu=np.zeros_like(uj)
@@ -569,10 +583,10 @@ class SwampyCore(object):
             Ai_cols=[]
             Ai_data=[]
 
-            bi[:] = 0.
+            self.bi[:] = 0.
 
-            for i in range(ncells):
-                if i in eta_cells: # line profiling may show that this is slow
+            for i in range(self.ncells):
+                if i in self.eta_cells: # line profiling may show that this is slow
                     # Ai[i,i]=1.0
                     Ai_rows.append(i) 
                     Ai_cols.append(i)
@@ -583,13 +597,13 @@ class SwampyCore(object):
                 for l in range(self.ncsides[i]):
                     j = self.grd.cells[i]['edges'][l]
                     if self.grd.edges[j]['mark'] == 0:  # if internal
-                        sum1 += sil[i, l] * aj[j] * (self.theta * cfterm[j] * fu[j] +
+                        sum1 += self.sil[i, l] * self.aj[j] * (self.theta * self.cfterm[j] * fu[j] +
                                                      (1-self.theta) * uj[j])
                         if hjbar[j] > dzmin:
                             hterm = hjtilde[j] / hjbar[j]
                         else:
                             hterm = 1.0
-                        coeff = gdt2theta2 * aj[j] * cfterm[j] / dc[j] * hterm
+                        coeff = self.gdt2theta2 * self.aj[j] * self.cfterm[j] / self.dc[j] * hterm
                         # Ai[i, i] += coeff
                         Ai_rows.append(i)
                         Ai_cols.append(i)
@@ -604,7 +618,7 @@ class SwampyCore(object):
                 # Ai is formulated in terms of just the change, and does not
                 # have 1's on the diagonal, but don't be tempted to remove vi here.
                 # it's correct.
-                bi[i] = vi[i] - dt * sum1
+                self.bi[i] = self.vi[i] - dt * sum1
             Ai=sparse.coo_matrix( (Ai_data,(Ai_rows,Ai_cols)), (ncells,ncells), dtype=np.float64 )
             Ai=Ai.tocsr()
             
@@ -618,10 +632,10 @@ class SwampyCore(object):
 
                     #for i in range(ncells):
                     #    Ao[i, i] += pi[i]
-                    non_eta=np.nonzero(~eta_mask)[0]
+                    non_eta=np.nonzero(~self.eta_mask)[0]
                     Ao_rows.extend(non_eta)
                     Ao_cols.extend(non_eta)
-                    Ao_data.extend(pi[~eta_mask])
+                    Ao_data.extend(self.pi[~self.eta_mask])
                     # Ao[~eta_mask,~eta_mask] += pi[~eta_mask]
 
                     Ao=sparse.coo_matrix( (Ao_data,(Ao_rows,Ao_cols)), (ncells,ncells), dtype=np.float64)
@@ -630,9 +644,9 @@ class SwampyCore(object):
 
                 #for i in range(ncells):
                 #    bo[i] = vi[i] + np.dot(Ai[i, :], ei[:]) - bi[i]
-                bo[:] = vi + Ai.dot(ei) - bi
+                self.bo[:] = self.vi + Ai.dot(self.ei) - self.bi
 
-                bo[eta_mask]=0. # no correction
+                self.bo[self.eta_mask]=0. # no correction
 
                 for bc in self.bcs:
                     if isinstance(bc,StageBC):
@@ -641,7 +655,7 @@ class SwampyCore(object):
                     elif isinstance(bc,FlowBC):
                         # flow bcs:
                         c,e,Q=bc.cell_edge_flow(self)
-                        bo[c] += -dt * Q
+                        self.bo[c] += -dt * Q
 
                 # For thacker we spend a lot of time here (30%)
                 # initial matrix has 680/2000 zeros on the diagonal --
@@ -653,14 +667,14 @@ class SwampyCore(object):
                 if wet_only: # limit matrix solve to wet cells
                     # Probably there is a better way to construct the
                     # mask for wet cells.
-                    wet=eta_mask | (pi>0.0) | (bo!=0.0)
+                    wet=self.eta_mask | (self.pi>0.0) | (self.bo!=0.0)
                     # A[wet,:][:,wet] x[wet] = b[wet]
                     
-                    bo_sel=bo[wet]
-                    x0_sel=x0[wet]
+                    bo_sel=self.bo[wet]
+                    x0_sel=self.x0[wet]
                     # csr seems fastest for this step, at 225us for ncells=2000
                     # when wet is 2/3 full.
-                    to_wet=sparse.identity(ncells,np.float64,format='csr')[wet,:]
+                    to_wet=sparse.identity(self.ncells,np.float64,format='csr')[wet,:]
                     # The goal is A[wet,:][:,wet]
                     # This approach gets there with matrix ops, but slicing may be
                     # faster.
@@ -668,10 +682,10 @@ class SwampyCore(object):
                     N_sel=len(bo_sel)
                 else:
                     # Solve the full system
-                    bo_sel=bo
-                    x0_sel=x0
+                    bo_sel=self.bo
+                    x0_sel=self.x0
                     Ao_sel=Ao
-                    N_sel=ncells
+                    N_sel=self.ncells
 
                 # 1. Try a basic preconditioner
                 #    diagonal entries are non-negative, limit to 1.0.
@@ -703,18 +717,18 @@ class SwampyCore(object):
                     ei_corr=full
                 
                 # better to clip ei and hi, not just correct hi.
-                ei[:] -= ei_corr
-                hi[:] = (zi + ei)
-                neg=hi<0
+                self.ei[:] -= ei_corr
+                self.hi[:] = (self.zi + self.ei)
+                neg=self.hi<0
                 if np.any(neg):
-                    ei[neg]=-zi[neg]
-                    hi[neg]=0
+                    self.ei[neg]=-self.zi[neg]
+                    self.hi[neg]=0
                 
                 # Update elevations
                 # for subgrid, these should become functions of eta rather than
                 # hi.
-                pi = self.calc_wetarea(hi)
-                vi = self.calc_volume(hi)
+                self.pi[:] = self.calc_wetarea(hi)
+                self.vi[:] = self.calc_volume(hi)
                 rms = np.sqrt(np.sum(np.multiply(ei_corr, ei_corr)) / self.ncells)
                 if rms < 0.01:
                     break
@@ -724,17 +738,17 @@ class SwampyCore(object):
                 ii = self.grd.edges[j]['cells']  # 2 cells
                 # RH: don't accelerate dry edges
                 hterm = 1.0*(hjstar[j]>0)
-                term = g * dt * self.theta * (ei[ii[1]] - ei[ii[0]]) / dc[j]
-                uj[j] = cfterm[j] * (fu[j] - term * hterm)
+                term = g * dt * self.theta * (self.ei[ii[1]] - self.ei[ii[0]]) / self.dc[j]
+                uj[j] = self.cfterm[j] * (fu[j] - term * hterm)
 
-            self.hjstar = hjstar = self.calc_hjstar(ei, zi, uj)
-            self.hjbar = hjbar = self.calc_hjbar(ei, zi)
-            self.hjtilde = hjtilde = self.calc_hjtilde(ei, zi)
-            vi = self.calc_volume(hi)
-            pi = self.calc_wetarea(hi)
-            aj = self.calc_edge_wetarea(hjstar)
-            cf = self.calc_edge_friction(uj, aj, hjbar)
-            cfterm = 1. / (1. + self.dt * cf[:])
+            self.hjstar = hjstar = self.calc_hjstar(self.ei, self.zi, uj)
+            self.hjbar = hjbar = self.calc_hjbar(self.ei, self.zi)
+            self.hjtilde = hjtilde = self.calc_hjtilde(self.ei, self.zi)
+            self.vi[:] = self.calc_volume(hi)
+            self.pi[:] = self.calc_wetarea(hi)
+            self.aj = self.calc_edge_wetarea(hjstar)
+            self.cf = self.calc_edge_friction(self.uj, self.aj, hjbar)
+            self.cfterm = 1. / (1. + self.dt * self.cf[:])
 
             # conservation properties
             tvol[n] = np.sum(hi * self.grd.cells['_area'][:])
@@ -840,6 +854,7 @@ class FlowBC(BC):
     """
     Q=None
     ramp_time=0.0
+    small_area=1e-6
     def cell_edge_flow(self,model):
         """
         return a tuple: ( array of cell indices,
@@ -856,7 +871,10 @@ class FlowBC(BC):
             ramp=1.0
 
         per_edge_A=(model.len[e]*model.hi[c])
-        per_edge_Q=self.Q*per_edge_A/per_edge_A.sum()
+        if per_edge_A.sum() < self.small_area:
+            log.warning("FlowBC: area sum is 0.")
+            
+        per_edge_Q=self.Q*per_edge_A/max(self.small_area,per_edge_A.sum())
         return c,e,per_edge_Q*ramp
         
     def apply_bc(self,model,A,b):

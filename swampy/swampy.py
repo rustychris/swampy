@@ -466,14 +466,14 @@ class SwampyCore(object):
         # PRECOMPUTE CONSTANTS
         self.gdt2theta2 = g * (self.dt*self.theta)**2 
 
-        dc = self.get_cell_center_spacings()
+        self.get_cell_center_spacings() # sets self.dc
         self.dist = self.edge_to_cen_dist()
-        alpha = self.get_alphas_Perot()
+        self.alpha = self.get_alphas_Perot()
         self.sil = self.get_sign_array()
         # lij = self.get_side_num_of_cell()
 
         # edge length divided by center spacing
-        len_dc_ratio = np.divide(self.len, dc)
+        # len_dc_ratio = np.divide(self.len, dc)
 
         # cell center values
         self.hi = np.zeros(self.ncells, np.float64)  # total depth
@@ -523,10 +523,10 @@ class SwampyCore(object):
 
         uj=self.uj
         ei=self.ei
-        alpha=self.alpha #?
+        alpha=self.alpha 
         sil=self.sil
         hi=self.hi
-        ncells=self.ncells# ?
+        ncells=self.ncells
         eta_cells=self.eta_cells
         cfterm=self.cfterm
 

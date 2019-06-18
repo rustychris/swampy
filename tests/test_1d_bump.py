@@ -100,29 +100,46 @@ class SwampyBump1D(swampy.SwampyCore):
                                           [0,self.W]],
                                     Q=self.W*self.upstream_flow ) )
 
-
-def calc_Fr(sim):
-    # Just make sure we actually got a hydraulic jump
+def calc_Fr_CFL_Bern(sim):
+    # To make sure we actually got a hydraulic jump
     e2c=sim.grd.edge_to_cells()
     u=sim.uj[sim.intern]
     x=sim.grd.edges_center()[sim.intern][:,0]
-    h=sim.hi[ e2c[sim.intern,:]].mean(axis=1)
+
+    ui=sim.get_center_vel(sim.uj)
+    xi=sim.grd.cells_center()[:,0]
+    
+    i_up=np.where(sim.uj>0,
+                  sim.grd.edges['cells'][:,0],
+                  sim.grd.edges['cells'][:,1])
+    h=sim.hi[ i_up[sim.intern] ] # or mean
     Fr=u/np.sqrt(9.8*h)
-    return Fr
+    CFL=u*sim.aj[sim.intern]*sim.dt/sim.vi[i_up[sim.intern]]
+    phi=u**2/(2*9.8) + sim.ei[i_up[sim.intern]]
+
+    return dict(x=x,xi=xi,Fr=Fr,CFL=CFL,phi=phi,u=u,
+                h=h,ui=ui[:,0])
+
 
 def test_low_flow():
     """
-    bump test case, all subcritical
+    bump test case, all subcritical.
+    This also tests ramp time for flow bc, conservation of Bernoulli
     """
     sim=SwampyBump1D(cg_tol=1e-10,dt=0.05,
+                     nx=int(20/0.1),
                      upstream_flow = 0.05)
     sim.set_grid()
     sim.set_initial_conditions()
     sim.set_bcs()
-    sim.run(t_end=100)
+    sim.bcs[1].ramp_time=100.0
+    sim.run(t_end=250)
     
-    Fr=calc_Fr(sim)
-    assert Fr.max() < 1.0,"Should be entirely subcritical"
+    V=calc_Fr_CFL_Bern(sim)
+    assert V['Fr'].max() < 1.0,"Should be entirely subcritical"
+    assert V['phi'].max() - V['phi'].min() < 0.002,"Bernoulli function is too variable"
+    Q=(sim.uj*sim.hjstar)[sim.intern]
+    assert np.all( np.abs(sim.W*sim.upstream_flow - Q) < 0.002),"Flow not constant"
 
 def test_med_flow():
     """
@@ -135,7 +152,7 @@ def test_med_flow():
     sim.set_bcs()
     sim.run(t_end=100)
 
-    Fr=calc_Fr(sim)
+    Fr=calc_Fr_CFL_Bern(sim)['Fr']
     assert Fr[0] < 1.0,"Inflow is not subcritical"
     assert Fr[-1] < 1.0,"Outflow is not subcritical"
     assert Fr.max() > 1.0,"Did not reach supercritical"

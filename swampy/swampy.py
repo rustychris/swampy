@@ -213,8 +213,9 @@ class SwampyCore(object):
         Calculate hjstar from Kramer and Stelling
         """
         hjstar = np.zeros(self.nedges)
-        for j in self.intern:
-            ii = self.grd.edges[j]['cells']
+
+        for j in range(self.nedges):
+            ii = self.edge_to_cells_reflect[j] 
 
             if uj[j] > 0:
                 e_up = ei[ii[0]]
@@ -228,7 +229,7 @@ class SwampyCore(object):
             # an aspect of the discretization.
             # nonetheless hjstar should not be allowed to go negative
             hjstar[j] = max(0, zj + e_up)
-
+            
         return hjstar
 
     def calc_hjbar(self, ei, zi):
@@ -333,6 +334,14 @@ class SwampyCore(object):
         self.exy = self.grd.edges_center()
         self.en = self.grd.edges_normals()
         self.len = self.grd.edges_length()
+        # Reflect edge neighbors at boundaries
+        ii=self.grd.edge_to_cells().copy()
+        nc1=ii[:,0]
+        nc2=ii[:,1]
+        ii[:,0]=np.where(ii[:,0]>=0,ii[:,0],ii[:,1])
+        ii[:,1]=np.where(ii[:,1]>=0,ii[:,1],ii[:,0])
+        self.edge_to_cells_reflect=ii
+        
         # number of valid sides for each cell
         self.ncsides = np.asarray([sum(jj >= 0) for jj in self.grd.cells['edges']])
 
@@ -515,11 +524,14 @@ class SwampyCore(object):
                     self.eta_mask[c]=True
         log.info("Total of %d stage BC cells"%len(self.eta_cells))
 
-    def run_until(self,t_end):
-        self.t_end = t_end
+    def run_until(self,t_end=None,nsteps=None):
         dt=self.dt
-        assert self.t<=t_end,"Request for t_end %s before t %s"%(t_end,t)
-        nsteps = np.int(np.round((t_end - self.t) / dt))
+        if t_end is not None:
+            self.t_end = t_end
+            assert self.t<=t_end,"Request for t_end %s before t %s"%(t_end,t)
+            nsteps = np.int(np.round((t_end - self.t) / dt))
+        elif nsteps is not None:
+            self.t_end = self.t+dt*nsteps
 
         uj=self.uj
         ei=self.ei
@@ -740,7 +752,7 @@ class SwampyCore(object):
                 hterm = 1.0*(hjstar[j]>0)
                 term = g * dt * self.theta * (self.ei[ii[1]] - self.ei[ii[0]]) / self.dc[j]
                 uj[j] = self.cfterm[j] * (fu[j] - term * hterm)
-
+                
             self.hjstar = hjstar = self.calc_hjstar(self.ei, self.zi, uj)
             self.hjbar = hjbar = self.calc_hjbar(self.ei, self.zi)
             self.hjtilde = hjtilde = self.calc_hjtilde(self.ei, self.zi)
@@ -750,12 +762,37 @@ class SwampyCore(object):
             self.cf = self.calc_edge_friction(self.uj, self.aj, hjbar)
             self.cfterm = 1. / (1. + self.dt * self.cf[:])
 
+            self.postcalc_update_bc_velocity()
+            
             # conservation properties
             tvol[n] = np.sum(hi * self.grd.cells['_area'][:])
 
             self.step_output(n=n,ei=ei,uj=uj)
 
         return hi, uj, tvol, ei
+
+    def postcalc_update_bc_velocity(self):
+        """
+        After the calculation of computational edges, update self.uj
+        for BC edges where possible.  Currently leaves stage bcs
+        alone, and just fills in velocity for flow bcs.
+        """
+        for bc in self.bcs:
+            if isinstance(bc,StageBC):
+                # not yet defined how edge adjacent to stage BC should be
+                # handled.  Leave as zero.
+                pass 
+            elif isinstance(bc,FlowBC):
+                c,e,Q=bc.cell_edge_flow(self)
+                for j,q in zip(e,Q):
+                    if Q==0.0: continue
+                    a=self.aj[j]
+                    if a<bc.small_area:
+                        log.warning("Setting BC velocity, very small area will be clipped to %.4e"%bc.small_area)
+                        a=bc.small_area
+                    # the negative sign due to convention that boundary edges have outward pointing normal
+                    # but boundary condition supplies inflow=positive q.
+                    self.uj[j] = -q/a
 
     def get_edge_x_vel(self, uj):
         """
@@ -850,7 +887,9 @@ class BC(object):
 class FlowBC(BC):
     """
     Represents a flow in m3/s applied across a set of boundary
-    edges
+    edges.
+
+    Positive Q is into the domain.  
     """
     Q=None
     ramp_time=0.0
@@ -860,6 +899,9 @@ class FlowBC(BC):
         return a tuple: ( array of cell indices,
                           array of edge indices,
                           array of inflows, m3/s )
+
+        The sign of the flow is positive into the domain, even though
+        the edge normals are pointing out of the domain.
         """
         c=self.cells(model)
         e=self.edges(model)

@@ -1,0 +1,17 @@
+Pass existing tests without caveat
+ - test_1d_bump fails when flow>0.10.
+   When run with a short enough timestep, it runs okay.
+
+Subgrid for edges
+
+Subgrid for cells
+
+Add 2D test case (parabolic dish)
+
+Scalar transport
+
+Adaptive timestepping
+
+Refactor
+
+Optimize

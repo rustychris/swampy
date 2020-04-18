@@ -6,7 +6,7 @@ Notes on relative error:
   Error for eta is normalized by the high water elevation.
   Max(time) RMS(space) relative error is currently 0.0663.
   This is sensitive to timestep.  It is not sensitive to theta
-  at the scale of 0.5 to 0.55.  It maybe sensitive to resolution.
+  at the scale of 0.5 to 0.55.  It may be sensitive to resolution.
 """
 
 import stompy.grid.unstructured_grid as ugrid

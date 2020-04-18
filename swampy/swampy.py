@@ -13,10 +13,8 @@ from __future__ import print_function
 import six
 import os
 
-import random
 import time
 
-import h5py
 from matplotlib.collections import PolyCollection
 from scipy.spatial.distance import euclidean
 from stompy import utils

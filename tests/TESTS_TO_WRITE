@@ -1,0 +1,3 @@
+Take an existing test, and shift everything up by some distance, and
+down by some distance.  Simple test to make sure that elevations
+and water depths are not mixed up anywhere.

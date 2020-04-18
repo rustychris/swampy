@@ -455,5 +455,89 @@ is related to
  it yet.
 \end_layout
 
+\begin_layout Subsubsection*
+Review of Kramer and Stelling
+\end_layout
+
+\begin_layout Standard
+\begin_inset Quotes eld
+\end_inset
+
+A conservative unstructured scheme for rapidly varied flows
+\begin_inset Quotes erd
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+The key is the velocity interpolation, which is tailored to the desired
+ conservation property.
+\end_layout
+
+\begin_layout Standard
+Equation 3 defines 
+\begin_inset Formula $h^{*}$
+\end_inset
+
+ (there written as 
+\begin_inset Formula $^{*}h_{f}$
+\end_inset
+
+).
+ It is the water column height, based on the shallower cell adjacent to
+ edge 
+\begin_inset Formula $f$
+\end_inset
+
+, and the upwinded water depth.
+ This is maybe a typo? A paragraph earlier, 
+\begin_inset Formula $h$
+\end_inset
+
+ is the cell water depth, 
+\begin_inset Formula $h=\zeta+b$
+\end_inset
+
+, where 
+\begin_inset Formula $\zeta$
+\end_inset
+
+ is free surface, 
+\begin_inset Quotes eld
+\end_inset
+
+water level above a plane of reference
+\begin_inset Quotes erd
+\end_inset
+
+ and 
+\begin_inset Formula $b$
+\end_inset
+
+ is the positive-down bed elevation.
+ 
+\emph on
+Presumably 
+\emph default
+they are upwinding surface elevation, and should have written 
+\begin_inset Formula $\zeta_{cL}$
+\end_inset
+
+ and 
+\begin_inset Formula $\zeta_{cR}$
+\end_inset
+
+ instead of 
+\begin_inset Formula $h_{cL}$
+\end_inset
+
+ and 
+\begin_inset Formula $h_{cR}$
+\end_inset
+
+.
+\end_layout
+
 \end_body
 \end_document

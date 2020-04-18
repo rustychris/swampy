@@ -1,3 +1,6 @@
-Take an existing test, and shift everything up by some distance, and
-down by some distance.  Simple test to make sure that elevations
-and water depths are not mixed up anywhere.
+More precise test for advection: add an option to scale the advective contribution
+or omit entirely, and make sure that the bernoulli tests then fail.
+
+Friction test: open channel flow at normal depth. Are slope and depth about right?
+
+ 

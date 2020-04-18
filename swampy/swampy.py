@@ -712,6 +712,7 @@ class SwampyCore(object):
                 # CG
                 ei_corr, success = sparse.linalg.cg(Ao_sel,
                                                     bo_sel, x0=x0_sel, M=M,
+                                                    atol=0.0,
                                                     tol=self.cg_tol)  # Increase tolerance for faster speed
                 # BiCGStab - not stable, gmres: not stable.
                 end = time.time()

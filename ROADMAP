@@ -1,12 +1,12 @@
-Pass existing tests without caveat
- - test_1d_bump fails when flow>0.10.
-   When run with a short enough timestep, it runs okay.
+Pass existing tests without caveat - DONE as of 2020-04-18
 
-Subgrid for edges
-
-Subgrid for cells
+Subgrid for edges & cells
+ - need to revisit meaning of hi, hj, hjstar, hjbar, hjtilde
+ - possibly revert to simpler advection scheme?
 
 Add 2D test case (parabolic dish)
+
+Refactor
 
 Scalar transport
 

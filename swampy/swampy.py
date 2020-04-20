@@ -5,8 +5,6 @@ Created on Fri 24 Mar 2018
 @organization: Resource Management Associates
 @contact: ed@rmanet.com, steve@rmanet.com
 @note: Highly simplified river model. Current assumptions:
-    - unsteady and barotropic terms only
-    - no subgrid
     - circumcenters inside cell
 """
 from __future__ import print_function
@@ -37,6 +35,9 @@ class SwampyCore(object):
     dt=0.025
     theta=1.0
     manning_n=0.0
+
+    max_subcells=10 # can be changed up to set_initial_conditions
+    max_subedges=10 # can be changed up to set_initial_conditions
     
     def __init__(self,**kw):
         utils.set_keywords(self,kw)
@@ -122,21 +123,28 @@ class SwampyCore(object):
         if self.theta==1.0: # no explicit term
             return
 
-        # three cases: deep enough to have the hjbar term, wet but not deep,
-        # and dry.
-        deep=hjbar>=dzmin
-        dry=hjstar<=0
-        
-        hterm=np.ones_like(hjbar)
-        hterm[deep]=hjtilde[deep]/hjbar[deep]
-        hterm[dry]=0.0
-        
         gDtThetaCompl = g * self.dt * (1.0 - self.theta)
         iLs=self.grd.edges['cells'][:,0]
         iRs=self.grd.edges['cells'][:,1]
+
+        hterm=np.ones_like(self.aj)
+        
+        # dry=hjstar<=0
+        dry=self.aj==0
+
+        if 0: # Kramer and Stelling
+            # three cases: deep enough to have the hjbar term, wet but not deep,
+            # and dry.
+            deep=hjbar>=dzmin
+            hterm[deep]=hjtilde[deep]/hjbar[deep]
+        else:
+            pass
+            
+        hterm[dry]=0.0
+
         fu[self.intern] -= (gDtThetaCompl * hterm * (ei[iRs] - ei[iLs]) / self.dc[:])[self.intern]
         
-    def get_fu_Perot(self, uj, alpha, sil, hi, hjstar, hjbar, hjtilde, fu):
+    def get_fu_Perot(self, uj, alpha, sil, hi, hjbar, hjtilde, hjstar, fu):
         """
         Return fu term with Perot method.
         """
@@ -146,148 +154,198 @@ class SwampyCore(object):
         iLs=self.grd.edges['cells'][:,0]
         iRs=self.grd.edges['cells'][:,1]
 
-        lhu=self.len[:] * hjstar[:] * uj[:]
+        lhu=self.aj[:] * uj[:]
 
-        cell_area=self.grd.cells['_area']
+        # FIX: blindly using calc_wetarea result pi instead of
+        # previous code that used self.area
+        cell_area=self.pi
 
         for j in self.intern:
-            if hjstar[j]<=0: continue # skip dry edges
-            
-            # ii = self.grd.edges[j]['cells']
             iL = iLs[j]
             iR = iRs[j]
 
-            # explicit barotropic moved out to separate function
+            # Skip dry edges
+            # non-subgrid:
+            # if hjstar[j]<=0: continue
             
-            # left cell
-            nsides = self.ncsides[iL]
-            sum1 = 0.
-            for l in range(nsides):
-                k = self.grd.cells[iL]['edges'][l]
-                Q = sil[iL, l] * lhu[k] # lhu[k]==self.len[k] * hjstar[k] * uj[k]
-                if Q >= 0.:  # ignore fluxes out of the cell
-                    continue
-                iitmp = self.grd.edges[k]['cells']
-                # i2 = iitmp[np.nonzero(iitmp - iL)[0][0]]  # get neighbor
-                i2 = iitmp[self.sil_idx[iL,l]]
-                ui_norm = ui[i2, 0] * self.en[j, 0] + ui[i2, 1] * self.en[j, 1]
-                sum1 += Q * (ui_norm - uj[j])
+            # FIX: does this properly allow for wetting?  Not sure whether
+            # the goal is to even allow for mom-advection at wetting front.
+            # But code below assumes area of cells>0.
+            if ((cell_area[iL]==0.0)
+                or (cell_area[iR]==0.0)
+                or (self.aj[j]==0.0) ):
+                continue 
 
-            fu[j] -= self.dt * alpha[j, 0] * sum1 / (cell_area[iL] * hjbar[j])
+            # code below uses hjbar, so better be sure it's nonzero,
+            # though not sure the code below is still correct w/subgrid
+            assert hjbar[j]>0
+            
+            # explicit barotropic moved out to separate function
 
-            # right cell
-            sum1 = 0.
-            nsides = self.ncsides[iR]
-            for l in range(nsides):
-                k = self.grd.cells[iR]['edges'][l]
-                Q = sil[iR, l] * lhu[k] # lhu[k]==self.len[k] * hjstar[k] * uj[k]
-                if Q >= 0.:  # ignore fluxes out of the cell
-                    continue
-                iitmp = self.grd.edges[k]['cells']
-                # i2 = iitmp[np.nonzero(iitmp - iR)[0][0]]  # get neighbor
-                i2 = iitmp[self.sil_idx[iR,l]]
-
-                ui_norm = ui[i2, 0] * self.en[j, 0] + ui[i2, 1] * self.en[j, 1]
-                sum1 += Q * (ui_norm - uj[j])
-            fu[j] -= self.dt * alpha[j, 1] * sum1 / (cell_area[iR] * hjbar[j])
+            for lr,iLR in [(0,iL),
+                           (1,iR)]:
+                nsides = self.ncsides[iLR]
+                sum1 = 0.
+                for l in range(nsides):
+                    k = self.grd.cells[iLR]['edges'][l]
+                    Q = sil[iL, l] * lhu[k] # lhu[k]==self.len[k] * hjstar[k] * uj[k] == self.aj * uj
+                    if Q >= 0.:  # ignore fluxes out of the cell
+                        continue
+                    iitmp = self.grd.edges[k]['cells']
+                    i2 = iitmp[self.sil_idx[iLR,l]]
+                    ui_norm = ui[i2, 0] * self.en[j, 0] + ui[i2, 1] * self.en[j, 1]
+                    sum1 += Q * (ui_norm - uj[j])
+                # in original code only difference is 2nd index to alpha
+                fu[j] -= self.dt * alpha[j, lr] * sum1 / (cell_area[iLR] * hjbar[j])
 
         return fu
 
-    def calc_phi(r, limiter):
+    # def calc_phi(r, limiter):
+    #     """
+    #     Calculate limiter phi
+    #     """
+    #     if limiter == 'vanLeer':
+    #         phi = (r + abs(r)) / (1.0 + r)
+    #     elif limiter == 'minmod':
+    #         phi = max(0.0, min(r, 1.0))
+    #     else:
+    #         print('limiter not defined %s' % limiter)
+    # 
+    #     return phi
+
+    def cell_to_edge_upwind(self, cell_data, u_j, tie='max'):
         """
-        Calculate limiter phi
+        Upwind a cell-centered value on edges based on the velocity u_j.
+         tie: 'max' For u_j==0 choose the greater of cell_data.
         """
-        if limiter == 'vanLeer':
-            phi = (r + abs(r)) / (1.0 + r)
-        elif limiter == 'minmod':
-            phi = max(0.0, min(r, 1.0))
+        ii = self.edge_to_cells_reflect
+        e_data = np.where( u_j>0, cell_data[ii[:,0]], cell_data[ii[:,1]] )
+        ties=(u_j==0.0)
+        if tie=='max':
+            e_data[ties] = np.maximum( cell_data[ii[ties,0]],
+                                       cell_data[ii[ties,1]] )
         else:
-            print('limiter not defined %s' % limiter)
+            raise Exception("Need to add support for other tie mechanisms")
+        return e_data
+        
+    # def calc_hjstar(self, ei, uj):
+    #     """
+    #     Calculate hjstar from Kramer and Stelling
+    #     """
+    #     e_up=self.cell_to_edge_upwind(ei,uj,tie='max')
+    # 
+    #     # force non-negative here.
+    #     # it is possible for zj+e_up<0.  this is not an error, just
+    #     # an aspect of the discretization.
+    #     # nonetheless hjstar should not be allowed to go negative
+    #     # FIX - definition of hjstar unclear.
+    #     hjstar = (e_up - self.zj_agg['min']).clip(0.0)
+    #     return hjstar
 
-        return phi
+    # def calc_hjbar(self, ei):
+    #     """
+    #     Calculate hjbar from Kramer and Stelling
+    #     (linear interpolation from depth in adjacent cells)
+    #     """
+    #     hjbar = np.zeros(self.nedges,np.float64)
+    #     for j in self.intern:  # loop over internal edges
+    #         ii = self.grd.edges[j]['cells']  # 2 cells
+    #         # Original code recalculated.
+    #         # RH  - hi is already limited to non-negative
+    #         # FIX - hi is not properly defined for subgrid, so
+    #         # hjbar isn't either.
+    #         hL=self.hi[ii[0]]
+    #         hR=self.hi[ii[1]]
+    #         hjbar[j] = self.alpha[j][0] * hL + self.alpha[j][1] * hR
+    # 
+    #     assert np.all(hjbar>=0)
+    #     return hjbar
 
-    def calc_hjstar(self, ei, zi, uj):
+    # def calc_hjtilde(self, ei):
+    #     """
+    #     Calculate hjtilde from Kramer and Stelling
+    #     (with average cell eta, and interpolated cell bed)
+    #     """
+    #     hjtilde = np.zeros(self.nedges,np.float64)
+    #     for j in self.intern:  # loop over internal edges
+    #         ii = self.grd.edges[j]['cells'] 
+    #         eavg = 0.5 * (ei[ii[0]] + ei[ii[1]])
+    #         # FIX: not sure of what the proper z is here.
+    #         bL = self.zi_agg['min'][ii[0]]
+    #         bR = self.zi_agg['min'][ii[1]]
+    #         hjtilde[j] = eavg - (self.alpha[j][0] * bL + self.alpha[j][1] * bR)
+    #     return hjtilde
+
+    def calc_volume(self, eta):
         """
-        Calculate hjstar from Kramer and Stelling
+        Calculate cell volume give eta for cell
+        With subgrid this gets more involved.
         """
-        hjstar = np.zeros(self.nedges)
+        # non-subgrid:
+        # return self.area * (eta+self.zi)
 
-        for j in range(self.nedges):
-            ii = self.edge_to_cells_reflect[j] 
-
-            if uj[j] > 0:
-                e_up = ei[ii[0]]
-            elif uj[j] < 0:
-                e_up = ei[ii[1]]
+        # subgrid information for cells is a list of elevation and corresponding area.
+        # the slow but clear way:
+        vol=np.zeros(self.ncells,np.float64)
+        for i in range(self.ncells):
+            k=np.searchsorted(self.zi_sub['z'][i], # _elevations_ where areas are defined
+                              eta[i])-1
+            if k<0: 
+                vol[i]=0.0
             else:
-                e_up = max(ei[ii[0]], ei[ii[1]])
-            zj=min(zi[ii[0]], zi[ii[1]])
-            # force non-negative here.
-            # it is possible for zj+e_up<0.  this is not an error, just
-            # an aspect of the discretization.
-            # nonetheless hjstar should not be allowed to go negative
-            hjstar[j] = max(0, zj + e_up)
-            
-        return hjstar
-
-    def calc_hjbar(self, ei, zi):
-        """
-        Calculate hjbar from Kramer and Stelling
-        (linear interpolation from depth in adjacent cells)
-        """
-        hjbar = np.zeros(self.nedges)
-        for j in self.intern:  # loop over internal edges
-            ii = self.grd.edges[j]['cells']  # 2 cells
-            # Original code recalculated.
-            # RH  - hi is already limited to non-negative
-            hL=self.hi[ii[0]]
-            hR=self.hi[ii[1]]
-            hjbar[j] = self.alpha[j][0] * hL + self.alpha[j][1] * hR
-
-        assert np.all(hjbar>=0)
-        return hjbar
-
-    def calc_hjtilde(self, ei, zi):
-        """
-        Calculate hjtilde from Kramer and Stelling
-        (with average cell eta, and interpolated cell bed)
-        """
-        hjtilde = np.zeros(self.nedges)
-        for j in self.intern:  # loop over internal edges
-            ii = self.grd.edges[j]['cells']  # 2 cells
-            eavg = 0.5 * (ei[ii[0]] + ei[ii[1]])
-            bL = zi[ii[0]]
-            bR = zi[ii[1]]
-            hjtilde[j] = eavg + self.alpha[j][0] * bL + self.alpha[j][1] * bR
-        # if np.any(hjtilde<0):
-        #     print("%d/%d hjtilde<0"%( (hjtilde<0).sum(), len(hjtilde)))
-        return hjtilde
-
-    def calc_volume(self, hi):
-        """
-        Calculate cell volume give cell total water depth
-        """
-        #vol = np.zeros(self.ncells)
-        #for i in range(self.ncells):
-        #    vol[i] = self.grd.cells['_area'][i] * hi[i]
-        #return vol
-        return self.grd.cells['_area'][:] * hi[:]
-
-    def calc_wetarea(self, hi):
+                dz_partial=(eta[i]-self.zi_sub['z'][i,k])
+                assert dz_partial>=0.0
+                vol[i]=self.zi_sub['Vtot'][i,k] + dz_partial*self.zi_sub['Atot'][i,k]
+        return vol
+        
+    def calc_wetarea(self, eta):
         """
         Calculate cell wetted area give cell total water depth
+        With subgrid this will be more involved.
         """
-        # RH: check had been disabled -- for speed, or correctness??
-        return np.where( hi>0.000001,
-                         self.grd.cells['_area'],
-                         0.0 )
+        # non-subgrid:
+        # return np.where( eta>-self.zi, self.area, 0.0)
 
-    def calc_edge_wetarea(self, hj):
+        # subgrid information for cells is a list of elevation and corresponding area.
+        # the slow but clear way:
+        A=np.zeros(self.ncells,np.float64)
+        for i in range(self.ncells):
+            k=np.searchsorted(self.zi_sub['z'][i], # _elevations_ where areas are defined
+                              eta[i])-1
+            if k<0: 
+                A[i]=0.0
+            else:
+                A[i]=self.zi_sub['Atot'][i,k]
+        return A
+
+    def calc_edge_wetarea(self, eta_j):
         """
-        Calculate wetted area for the cell faces
+        Calculate wetted area for edges.
+        eta_j: freesurface at the edge, presumably from upwinding cell
+        eta (and max when u==0.0).
+
+        This gets called with hjstar.  For subgrid, what is appropriate?
+
+        hjstar is total depth with upwinded eta and shallower zi.
+
+        Subgrid puts the onus of proper edge bathy on the user, rather
+        than defaulting to shallower zi.
         """
-        Aj=self.len * hj
-        assert np.all(Aj>=0)
+        # non-subgrid:
+        # return self.len * (self.zj + eta_j).clip(0.0)
+
+        # subgrid information for cells is a list of elevation and corresponding area.
+        # the slow but clear way:
+        Aj=np.zeros(self.nedges,np.float64)
+        for j in self.intern:
+            k=np.searchsorted(self.zj_sub['z'][j], # _elevations_ where areas are defined
+                              eta_j[j])-1
+            if k<0: 
+                Aj[j]=0.0
+            else:
+                dz_partial=(eta_j[j]-self.zj_sub['z'][j,k])
+                assert dz_partial>=0.0
+                Aj[j]=self.zj_sub['Atot'][j,k] + dz_partial*self.zj_sub['ltot'][j,k]
         return Aj
 
     def calc_edge_friction(self, uj, aj, hj):
@@ -295,6 +353,8 @@ class SwampyCore(object):
         Calculate friction coef at edge
         Cf = n^2*g*|u|/Rh^(4/3)
         """
+
+        # FIX: Should update to deal with subedges
         cf = np.zeros(self.nedges)
         n = self.manning_n
         for j in self.intern:
@@ -351,19 +411,12 @@ class SwampyCore(object):
         Spacings for external edges are set to dc_min (should not be used)
         """
         dc = dc_min * np.ones(self.nedges, np.float64)
-        if 0:
-            for j in self.intern:
-                ii = self.grd.edges[j]['cells']  # 2 cells
-                xy = self.grd.cells[ii]['_center']  # 2x2 array
-                dc[j] = euclidean(xy[0], xy[1])  # from scipy
-        else:
-            # vectorize
-            i0=self.grd.edges['cells'][self.intern,0]
-            i1=self.grd.edges['cells'][self.intern,1]
-            dc[self.intern] = utils.dist( self.grd.cells['_center'][i0],
-                                          self.grd.cells['_center'][i1] )
+        # vectorize
+        i0=self.grd.edges['cells'][self.intern,0]
+        i1=self.grd.edges['cells'][self.intern,1]
+        dc[self.intern] = utils.dist( self.grd.cells['_center'][i0],
+                                      self.grd.cells['_center'][i1] )
         self.dc = dc
-
         return dc
 
     def edge_to_cen_dist(self):
@@ -389,28 +442,17 @@ class SwampyCore(object):
         Return Perot weighting coefficients
         Coefficients for external edges are set to zero (should not be used)
         """
-        if 0:
-            alpha = np.zeros((self.nedges, 2), np.float64)
-            for j in self.intern:
-                side_xy = self.exy[j]
-                ii = self.grd.edges[j]['cells']
-                cen_xyL = self.grd.cells['_center'][ii[0]]
-                cen_xyR = self.grd.cells['_center'][ii[1]]
-                alpha[j, 0] = euclidean(side_xy, cen_xyL) / self.dc[j]
-                alpha[j, 1] = euclidean(side_xy, cen_xyR) / self.dc[j]
-            self.alpha = alpha
-        else: # vectorized
-            # should probably be refactored to used edge-center distances as above.
-            # for cyclic grid should be fine.  for non-cyclic, need to verify what
-            # the appropriate distance (center-to-intersection, or perpendicular)
-            alpha = np.zeros((self.nedges, 2), np.float64)
-            i0=self.grd.edges['cells'][self.intern,0]
-            i1=self.grd.edges['cells'][self.intern,1]
-            cen_xyL = self.grd.cells['_center'][i0]
-            cen_xyR = self.grd.cells['_center'][i1]
-            alpha[self.intern, 0] = utils.dist(self.exy[self.intern], cen_xyL) / self.dc[self.intern]
-            alpha[self.intern, 1] = utils.dist(self.exy[self.intern], cen_xyR) / self.dc[self.intern]
-            self.alpha = alpha
+        # should probably be refactored to used edge-center distances as above.
+        # for cyclic grid should be fine.  for non-cyclic, need to verify what
+        # the appropriate distance (center-to-intersection, or perpendicular)
+        alpha = np.zeros((self.nedges, 2), np.float64)
+        i0=self.grd.edges['cells'][self.intern,0]
+        i1=self.grd.edges['cells'][self.intern,1]
+        cen_xyL = self.grd.cells['_center'][i0]
+        cen_xyR = self.grd.cells['_center'][i1]
+        alpha[self.intern, 0] = utils.dist(self.exy[self.intern], cen_xyL) / self.dc[self.intern]
+        alpha[self.intern, 1] = utils.dist(self.exy[self.intern], cen_xyR) / self.dc[self.intern]
+        self.alpha = alpha
 
         return alpha
 
@@ -452,7 +494,8 @@ class SwampyCore(object):
         # Initial free surface elevation, positive up
         self.ic_ei = np.zeros(self.ncells, np.float64)
         # Bed elevation, positive down
-        self.ic_zi = np.zeros_like(self.ic_ei)
+        self.ic_zi_sub = self.allocate_cell_subgrid()
+        self.ic_zj_sub = self.allocate_edge_subgrid()
 
         # other contenders:
         # self.ds_i  index array for cell BCs on downstream end
@@ -483,9 +526,9 @@ class SwampyCore(object):
         # len_dc_ratio = np.divide(self.len, dc)
 
         # cell center values
-        self.hi = np.zeros(self.ncells, np.float64)  # total depth
-        self.zi = np.zeros(self.ncells, np.float64)  # bed elevation, measured positive down
-        self.ei = np.zeros(self.ncells, np.float64)  # water surface elevation
+        # self.hi = np.zeros(self.ncells, np.float64)  # total depth
+        # self.zi = np.zeros(self.ncells, np.float64)  # bed elevation, measured positive down. replace w/subgrid
+        self.ei = np.zeros(self.ncells, np.float64)  # water surface elevation, cells
         self.vi = np.zeros(self.ncells, np.float64)  # cell volumes
         self.pi = np.zeros(self.ncells, np.float64)  # cell wetted areas
 
@@ -494,6 +537,7 @@ class SwampyCore(object):
         self.qj = np.zeros(self.nedges, np.float64)  # normal velocity*h at side
         self.aj = np.zeros(self.nedges, np.float64)  # edge wet areas
         self.cf = np.zeros(self.nedges, np.float64)  # edge friction coefs
+        self.zj = np.zeros(self.nedges, np.float64)  # edge depth -- to replace w/subgrid
         self.cfterm = np.zeros(self.nedges, np.float64)  # edge friction coefs - term for matrices
 
         # Matrix
@@ -505,13 +549,17 @@ class SwampyCore(object):
         self.x0 = np.zeros(self.ncells, np.float64)
 
         # short vars for grid
-        self.area = self.grd.cells['_area']
+        # self.area = self.grd.cells['_area']
 
         # set initial conditions
-        self.zi[:] = self.ic_zi[:]
-        self.ei[:] = np.maximum(self.ic_ei[:],-self.zi) # RH: prop up to at least -zi
-        self.hi[:] = self.zi + self.ei # update total depth. assume ei is valid, so no clipping here.
-        assert np.all(self.hi>=0.0)
+        self.prepare_cell_subgrid(self.ic_zi_sub)
+        self.prepare_edge_subgrid(self.ic_zj_sub)
+        
+        self.ei[:] = np.maximum(self.ic_ei[:],self.zi_agg['min']) # RH: prop up to at least deepest point
+        # FIX - unsure of correct definition of hi 
+        # self.hi[:] = self.ei - self.zi_agg['min'] # update total depth. assume ei is valid, so no clipping here.
+        # assert np.all(self.hi>=0.0)
+        self.vi[:] = self.calc_volume(self.ei)
                       
         self.eta_cells={}
         self.eta_mask=np.zeros( self.ncells, np.bool8)
@@ -522,60 +570,150 @@ class SwampyCore(object):
                     self.eta_mask[c]=True
         log.info("Total of %d stage BC cells"%len(self.eta_cells))
 
-    def run_until(self,t_end=None,nsteps=None):
+    zi_sub_dtype=[ ('z',np.float64), # positive UP
+                   ('A',np.float64), # area exactly at this elevation
+                   ('Atot',np.float64), # net wet area at this interface
+                   ('Vtot',np.float64)  # cumulative volume below this interface
+    ]
+    zj_sub_dtype=[ ('z',np.float64), # positive UP
+                   ('l',np.float64), # length exactly at this elevation
+                   ('ltot',np.float64), # net length at this interface
+                   ('Atot',np.float64), # net area below this interface
+    ]
+    
+    def allocate_cell_subgrid(self):
+        # scan to find max number of subgrid elements
+        return np.zeros( (self.ncells, self.max_subcells), 
+                         dtype=self.zi_sub_dtype)
+
+    def allocate_edge_subgrid(self):
+        # scan to find max number of subgrid elements
+        return np.zeros( (self.nedges, self.max_subedges), 
+                         dtype=self.zj_sub_dtype)
+
+    def prepare_cell_subgrid(self,zi_sub_in):
+        """
+        Copy the subgrid data and standardize/preprocess
+        as needed.
+        Assume zi_sub_in already np.array( (Nc,max_subcells), zi_sub_dtype),
+        with 'z' and 'A' fields populated
+        """
+        self.zi_sub=zi_sub_in.copy()
+        
+        self.zi_agg=np.zeros(self.ncells,[('min',np.float64), # deepest
+                                          ('max',np.float64), # shallowest
+                                          ('mean',np.float64)]) # area-weighted mean
+
+        for i in range(self.ncells):
+            pop=self.zi_sub['A'][i,:]>0.0
+            Apop=self.zi_sub['A'][i,pop]
+            zpop=self.zi_sub['z'][i,pop]
+            self.zi_agg[i]['max']=zpop.max()
+            self.zi_agg[i]['min']=zpop.min()
+            self.zi_agg[i]['mean']=(zpop*Apop).sum() / Apop.sum()
+            
+            self.zi_sub['z'][i,~pop]=np.inf
+            order=np.argsort(self.zi_sub['z'][i])
+            self.zi_sub['z'][i,:]=self.zi_sub['z'][i,order]
+            self.zi_sub['A'][i,:]=self.zi_sub['A'][i,order]
+            self.zi_sub['Atot'][i,:]=np.cumsum(self.zi_sub['A'][i,:])
+                    
+            # V[i,k] is the volume up to that elevation
+            # so V[i,0] is always 0.0
+            self.zi_sub['Vtot'][i,0]=0.0
+            dz=np.diff(self.zi_sub['z'][i])
+            self.zi_sub['Vtot'][i,1:]=np.cumsum( dz*self.zi_sub['Atot'][i,:-1] )
+
+    def prepare_edge_subgrid(self,zj_sub_in):
+        """
+        Copy the subgrid data and standardize/preprocess
+        as needed.
+        Assume zj_sub_in already np.array( (Ne,max_subedges), zj_sub_dtype),
+        with 'z' and 'l' fields populated
+        """
+        self.zj_sub=zj_sub_in.copy()
+        self.zj_agg=np.zeros(self.nedges,[('min',np.float64), # deepest
+                                          ('max',np.float64), # shallowest
+                                          ('mean',np.float64)]) # length-weighted mean
+
+        for j in range(self.nedges):
+            pop=self.zj_sub['l'][j,:]>0.0
+            lpop=self.zj_sub['l'][j,pop]
+            zpop=self.zj_sub['z'][j,pop]
+            self.zj_agg[j]['max']=zpop.max()
+            self.zj_agg[j]['min']=zpop.min()
+            self.zj_agg[j]['mean']=(zpop*lpop).sum() / lpop.sum()
+            
+            self.zj_sub['z'][j,~pop]=np.inf
+            order=np.argsort(self.zj_sub['z'][j])
+            self.zj_sub['z'][j,:]=self.zj_sub['z'][j,order]
+            self.zj_sub['l'][j,:]=self.zj_sub['l'][j,order]
+            self.zj_sub['ltot'][j,:]=np.cumsum(self.zj_sub['l'][j,:])
+                    
+            # A[j,k] is the area up to the kth interface
+            # so A[j,0] is always 0.0
+            self.zj_sub['Atot'][j,0]=0.0
+            dz=np.diff(self.zj_sub['z'][j])
+            self.zj_sub['Atot'][j,1:]=np.cumsum( dz*self.zj_sub['ltot'][j,:-1] )
+        
+    def run_until(self,t_end=None,n_steps=None):
         dt=self.dt
         if t_end is not None:
             self.t_end = t_end
             assert self.t<=t_end,"Request for t_end %s before t %s"%(t_end,t)
-            nsteps = np.int(np.round((t_end - self.t) / dt))
-        elif nsteps is not None:
-            self.t_end = self.t+dt*nsteps
+            n_steps = np.int(np.round((t_end - self.t) / dt))
+        elif n_steps is not None:
+            self.t_end = self.t+dt*n_steps
 
         uj=self.uj
         ei=self.ei
         alpha=self.alpha 
         sil=self.sil
-        hi=self.hi
+        # hi=self.hi 
         ncells=self.ncells
         eta_cells=self.eta_cells
         cfterm=self.cfterm
 
-        hjstar = self.calc_hjstar(self.ei, self.zi, self.uj)
-        hjbar = self.calc_hjbar(self.ei, self.zi)
-        hjtilde = self.calc_hjtilde(self.ei, self.zi)
-        self.vi[:] = self.calc_volume(self.hi)
-        self.pi[:] = self.calc_wetarea(self.hi)
-        # RH: this had been using hjbar, but that leads to issues with
-        # wetting and drying. hjstar I think is more appropriate, and in
-        # fact hjstar is used in the loop, just not in Ai.
-        # this clears up bad updates to ei
-        # a lot of this is duplicated at the end of the time loop.
-        # would be better to rearrange to avoid that duplication.
-        self.aj[:] = self.calc_edge_wetarea(hjstar)
-        self.cf[:] = self.calc_edge_friction(self.uj, self.aj, hjbar)
-        self.cfterm[:] = 1. / (1. + self.dt * self.cf[:])
+        def update_geometry(ei,uj):
+            """
+            Update cell volume, area, edge area, friction terms
+            based on freesurface and edge velocity
+            """
+            # hjstar = self.calc_hjstar(self.ei, self.uj)
+            # hjbar = self.calc_hjbar(self.ei)
+            # hjtilde = self.calc_hjtilde(self.ei)
+            self.vi[:] = self.calc_volume(ei)
+            self.pi[:] = self.calc_wetarea(ei)
+
+            eta_j=self.cell_to_edge_upwind(cell_data=ei,
+                                           u_j=uj,tie='max')
+            self.aj[:] = self.calc_edge_wetarea(eta_j)
+            self.cf[:] = self.calc_edge_friction(uj, self.aj, self.aj/self.len)
+            self.cfterm[:] = 1. / (1. + self.dt * self.cf[:])
+
+        update_geometry(ei,uj)
         
         # change code to vector operations at some point
         # time stepping loop
-        tvol = np.zeros(nsteps)
-        for n in range(nsteps):
+        tvol = np.zeros(n_steps)
+        for n in range(n_steps):
             self.t+=dt # update model time
-            log.info('step %d/%d  t=%.3fs'%(n+1,nsteps,self.t))
+            log.info('step %d/%d  t=%.3fs'%(n+1,n_steps,self.t))
 
             # G: explicit baroptropic term, advection term
             fu=np.zeros_like(uj)
             fu[self.intern]=uj[self.intern]
-            fu[hjstar<=0]=0.0
+            fu[self.aj<=0]=0.0
             
-            self.add_explicit_barotropic(hjstar=hjstar,hjbar=hjbar,hjtilde=hjtilde,ei=ei,fu=fu)
+            self.add_explicit_barotropic(ei=ei,fu=fu,hjstar=None,hjbar=None,hjtilde=None)
             # shouldn't happen, but check to be sure
-            assert np.all( fu[hjstar==0.0]==0.0 )
+            assert np.all( fu[self.aj==0.0]==0.0 )
             
-            self.get_fu(uj,alpha=alpha,sil=sil,hi=hi,hjstar=hjstar,hjtilde=hjtilde,hjbar=hjbar,
-                        fu=fu)
+            self.get_fu(uj,fu=fu,alpha=alpha,sil=sil,
+                        hi=None,hjstar=None,hjtilde=None,hjbar=None)
             
             # get_fu should avoid this, but check to be sure
-            assert np.all( fu[hjstar==0.0]==0.0 )
+            assert np.all( fu[self.aj==0.0]==0.0 )
 
             # Following Casulli 2009, eq 18
             # zeta^{m+1}=zeta^m-[P(zeta^m)+T]^{-1}[V(zeta^m)+T.zeta^m-b]
@@ -609,10 +747,11 @@ class SwampyCore(object):
                     if self.grd.edges[j]['mark'] == 0:  # if internal
                         sum1 += self.sil[i, l] * self.aj[j] * (self.theta * self.cfterm[j] * fu[j] +
                                                      (1-self.theta) * uj[j])
-                        if hjbar[j] > dzmin:
-                            hterm = hjtilde[j] / hjbar[j]
-                        else:
-                            hterm = 1.0
+                        # Disabled during transition to subgrid
+                        #if hjbar[j] > dzmin:
+                        #    hterm = hjtilde[j] / hjbar[j]
+                        #else:
+                        hterm = 1.0
                         coeff = self.gdt2theta2 * self.aj[j] * self.cfterm[j] / self.dc[j] * hterm
                         # Ai[i, i] += coeff
                         Ai_rows.append(i)
@@ -728,18 +867,20 @@ class SwampyCore(object):
                     ei_corr=full
                 
                 # better to clip ei and hi, not just correct hi.
-                self.ei[:] -= ei_corr
-                self.hi[:] = (self.zi + self.ei)
-                neg=self.hi<0
-                if np.any(neg):
-                    self.ei[neg]=-self.zi[neg]
-                    self.hi[neg]=0
+                # FIX - hi not properly defined for subgrid
+                #self.hi[:] = (self.ei - self.zi_agg['min'])
+                # neg=self.hi<0
+                # if np.any(neg):
+                #     self.ei[neg]=self.zi_agg['min'][neg]
+                #     self.hi[neg]=0
+                self.ei[:] = np.maximum( self.ei[:] - ei_corr,
+                                         self.zi_agg['min'] )
                 
                 # Update elevations
                 # for subgrid, these should become functions of eta rather than
                 # hi.
-                self.pi[:] = self.calc_wetarea(hi)
-                self.vi[:] = self.calc_volume(hi)
+                self.pi[:] = self.calc_wetarea(self.ei)
+                self.vi[:] = self.calc_volume(self.ei)
                 rms = np.sqrt(np.sum(np.multiply(ei_corr, ei_corr)) / self.ncells)
                 if rms < 0.01:
                     break
@@ -748,27 +889,23 @@ class SwampyCore(object):
             for j in self.intern:  # loop over internal cells
                 ii = self.grd.edges[j]['cells']  # 2 cells
                 # RH: don't accelerate dry edges
-                hterm = 1.0*(hjstar[j]>0)
+                hterm = 1.0*(self.aj[j]>0)
                 term = g * dt * self.theta * (self.ei[ii[1]] - self.ei[ii[0]]) / self.dc[j]
                 uj[j] = self.cfterm[j] * (fu[j] - term * hterm)
-                
-            self.hjstar = hjstar = self.calc_hjstar(self.ei, self.zi, uj)
-            self.hjbar = hjbar = self.calc_hjbar(self.ei, self.zi)
-            self.hjtilde = hjtilde = self.calc_hjtilde(self.ei, self.zi)
-            self.vi[:] = self.calc_volume(hi)
-            self.pi[:] = self.calc_wetarea(hi)
-            self.aj = self.calc_edge_wetarea(hjstar)
-            self.cf = self.calc_edge_friction(self.uj, self.aj, hjbar)
-            self.cfterm = 1. / (1. + self.dt * self.cf[:])
+
+            # DBG: temporary check
+            assert np.abs(self.uj).max() < 20.0
+
+            update_geometry(ei=self.ei,uj=self.uj)
 
             self.postcalc_update_bc_velocity()
             
             # conservation properties
-            tvol[n] = np.sum(hi * self.grd.cells['_area'][:])
+            tvol[n] = np.sum(self.vi)
 
             self.step_output(n=n,ei=ei,uj=uj)
 
-        return hi, uj, tvol, ei
+        return None, uj, tvol, ei
 
     def postcalc_update_bc_velocity(self):
         """

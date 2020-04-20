@@ -23,7 +23,7 @@ import six
 six.moves.reload_module(swampy)
 ##
 
-class SwampyThacker1D(swampy.SwampyCore):
+class SubgridThacker1D(swampy.SwampyCore):
     W=20 # channel width, doesn't matter.
     L=1000 # channel length
     r0=330 # L/3 reasonable. scale of the parabolic bathymetry
@@ -45,12 +45,15 @@ class SwampyThacker1D(swampy.SwampyCore):
             dt=0.5*dx/self.U
             kw['dt']=dt
 
-        super(SwampyThacker1D,self).__init__(**kw)
+        super(SubgridThacker1D,self).__init__(**kw)
 
         # set a scale for eta, used to make eta errors relative
         # this is approximately the high water elevation
         self.eta_scale= self.eta * self.h0*(2 - self.eta)
         self.max_rel_error=0.0
+
+        print("Testing with no advection")
+        self.get_fu=self.get_fu_no_adv
 
     last_plot=-1000000
     plot_interval_per_period=1./20 # fraction of period
@@ -76,8 +79,11 @@ class SwampyThacker1D(swampy.SwampyCore):
         """
         fs= self.eta * self.h0/self.r0*(2*xy[:,0]*np.cos(self.omega*t)
                                         - self.eta*self.r0*np.cos(self.omega*t)**2)
-        bed=self.depth_fn(xy)
-        return np.maximum(fs,bed)
+        # this doesn't work with subgrid -- leaves a bit of water all over the place
+        # since dry eta is defined on subgrid.
+        #bed=self.depth_fn(xy)
+        #return np.maximum(fs,bed)
+        return fs
             
     def set_grid(self):
         g=ugrid.UnstructuredGrid(max_sides=4)
@@ -85,17 +91,58 @@ class SwampyThacker1D(swampy.SwampyCore):
                           self.nx+1,self.ny)
         g.orient_edges()
 
-        g.add_node_field('node_depth',self.depth_fn(g.nodes['x']))
-        g.add_cell_field('cell_depth',self.depth_fn(g.cells_center()))
+        #g.add_node_field('node_depth',self.depth_fn(g.nodes['x']))
+        #g.add_cell_field('cell_depth',self.depth_fn(g.cells_center()))
 
-        super(SwampyThacker1D,self).set_grid(g)
+        super(SubgridThacker1D,self).set_grid(g)
     def set_initial_conditions(self):
         # allocate:
-        super(SwampyThacker1D,self).set_initial_conditions()
+        self.max_subcells=10 # each cell divided up into 10
+        self.max_subedges=10 # each cell divided up into 10
         
-        self.ic_zi[:]=-self.grd.cells['cell_depth']
-        h=self.eta_fn(self.grd.cells_center(),t=0)
-        self.ic_ei[:]=np.maximum(h,-self.ic_zi)
+        super(SubgridThacker1D,self).set_initial_conditions()
+        
+        # self.ic_zi[:]=-self.grd.cells['cell_depth']
+
+        for i in range(self.grd.Ncells()):
+            node_x=self.grd.nodes['x'][self.grd.cell_to_nodes(i),0]
+            alpha=(np.arange(self.max_subcells)+0.5)/self.max_subcells
+            x_sub = (1-alpha)*node_x.min() + alpha*node_x.max()
+            y_sub = self.grd.cells_center()[i,1]*np.ones(self.max_subcells)
+
+            self.ic_zi_sub['z'][i,:]=self.depth_fn(np.c_[x_sub,y_sub])
+            self.ic_zi_sub['A'][i,:]=self.grd.cells_area()[i]/self.max_subcells
+        
+        self.ic_ei[:]=self.eta_fn(self.grd.cells_center(),t=0)
+
+        # Edges:
+        ltot=self.grd.edges_length()
+        for j in range(self.grd.Nedges()):
+            node_x=self.grd.nodes['x'][self.grd.edges['nodes'][j],0]
+            if node_x[0] == node_x[1]:
+                n_subedge=1
+            else:
+                n_subedge=self.max_subedges
+                
+            alpha=(np.arange(n_subedge)+0.5)/n_subedge
+            x_sub = (1-alpha)*node_x[0] + alpha*node_x[1]
+            y_sub = self.grd.edges_center()[j,1]*np.ones(n_subedge)
+
+            self.ic_zj_sub['z'][j,:]=self.depth_fn(np.c_[x_sub,y_sub])
+            self.ic_zj_sub['l'][j,:]=ltot[j]/n_subedge
+
+    def plot_cell_scalar(self,ax,scal,*a,**kw):
+        srcs=[]
+        segs=[]
+        for i in range(self.grd.Ncells()):
+            cell_points=self.grd.nodes['x'][self.grd.cell_to_nodes(i),:]
+            
+            srcs += [i,i,-1]
+            segs += [cell_points[:,0].min(),cell_points[:,0].max(),
+                     np.nan]
+        segs=np.array(segs)
+        srcs=np.array(srcs)
+        return ax.plot(segs,scal[srcs],*a,**kw)
         
     def snapshot_figure(self,**kwargs):
         """
@@ -105,48 +152,28 @@ class SwampyThacker1D(swampy.SwampyCore):
         fig.clf()
         ax=fig.add_subplot(1,1,1)
 
-        ax.plot(self.grd.cells_center()[:,0], -self.zi, 'b-o',ms=3)
-        ax.plot(self.grd.cells_center()[:,0], self.ei, 'g-' )
-        ax.plot(self.grd.cells_center()[:,0],
-                self.eta_fn(self.grd.cells_center(),self.t),color='orange')
-
-def test_1d_thacker():
-    # basic run.
-    sim=SwampyThacker1D(cg_tol=1e-10)
-    sim.set_grid()
-    sim.set_initial_conditions()
-    (hi, uj, tvol, ei) = sim.run(t_end=sim.period)
-    assert sim.max_rel_error < 0.07, "Regression on relative error %.4f"%sim.max_rel_error
+        self.plot_cell_scalar(ax, self.zi_agg['min'],'b-')
+        self.plot_cell_scalar(ax, self.ei, 'g-')
+        #ax.plot(self.grd.cells_center()[:,0],
+        # self.eta_fn(self.grd.cells_center(),self.t),color='orange')
+        return fig
     
-def test_1d_thacker_fine():
-    sim=SwampyThacker1D(cg_tol=1e-10,nx=200)
-    sim.set_grid()
-    sim.set_initial_conditions()
-    (hi, uj, tvol, ei) = sim.run(t_end=sim.period)
-    assert sim.max_rel_error < 0.07, "Regression on relative error %.4f"%sim.max_rel_error
-
-def test_1d_thacker_coarse():
-    sim=SwampyThacker1D(cg_tol=1e-10,nx=50)
-    sim.set_grid()
-    sim.set_initial_conditions()
-    (hi, uj, tvol, ei) = sim.run(t_end=sim.period)
-    assert sim.max_rel_error < 0.15, "Regression on relative error %.4f"%sim.max_rel_error
-
-def test_1d_thacker_coarse_finetime():
-    # use a shorter timestep than the resolution
-    # calls for
-    sim=SwampyThacker1D(cg_tol=1e-10,nx=50,dt=5.0)
-    sim.set_grid()
-    sim.set_initial_conditions()
-    (hi, uj, tvol, ei) = sim.run(t_end=sim.period)
-    # 2020-04-18: relax from 0.07 to 0.09.  Not positive that it had been passing
-    # before anyway.
-    assert sim.max_rel_error < 0.09, "Regression on relative error %.4f"%sim.max_rel_error
-
 if 1:
-    sim=SwampyThacker1D(cg_tol=1e-10,nx=200)
+    sim=SubgridThacker1D(cg_tol=1e-10,nx=50,dt=2.0)
     sim.set_grid()
     sim.set_initial_conditions()
-    (hi, uj, tvol, ei) = sim.run(t_end=sim.period)
+
+    sim.prepare_to_run()
+    
     sim.snapshot_figure()
-    print("Max rms rel error: %.4f"%sim.max_rel_error)
+    plt.draw()
+    plt.pause(0.01)
+
+    while sim.t<30.0:
+        (_, uj, tvol, ei) = sim.run_until(sim.t+sim.dt)
+        print("Max rms rel error: %.4f"%sim.max_rel_error)
+        fig=sim.snapshot_figure()
+        fig.canvas.draw()
+        fig.canvas.start_event_loop(0.01)
+
+# Failing at the wetting front        

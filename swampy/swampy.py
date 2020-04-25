@@ -1067,7 +1067,7 @@ class FlowBC(BC):
         else:
             ramp=1.0
 
-        per_edge_A=(model.len[e]*model.hi[c])
+        per_edge_A=model.aj[e]
         if per_edge_A.sum() < self.small_area:
             log.warning("FlowBC: area sum is 0.")
             
@@ -1076,7 +1076,10 @@ class FlowBC(BC):
         
     def apply_bc(self,model,A,b):
         c,e,Q=self.cell_edge_flow(model)
-        b[c] += (model.dt / model.area[c]) * Q
+        # used to be model.area[c]
+        # TODO: now that wet area=pi is dynamic, is this still the correct
+        # way to set the BC?  What happens when pi is updated?
+        b[c] += model.dt / max(self.small_area,model.pi[c]) * Q
 
 class StageBC(BC):
     h=None

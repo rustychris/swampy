@@ -1,14 +1,20 @@
 Pass existing tests without caveat - DONE as of 2020-04-18
+Subgrid for edges & cells - BASIC DONE
 
-Subgrid for edges & cells
- - need to revisit meaning of hi, hj, hjstar, hjbar, hjtilde
- - possibly revert to simpler advection scheme?
+Verify that bump tests fail with lack of advection
+ - update bump test to deal with subgrid specification
+   - currently a disconnect where boundary edges have no area, and
+     so we can't calculate Q there.
+
+Add basic upwind momentum advection (roughly what is in Zhao's(sp?) thesis?)
 
 Add 2D test case (parabolic dish)
 
 Refactor
 
 Scalar transport
+
+Improved advection scheme?
 
 Adaptive timestepping
 

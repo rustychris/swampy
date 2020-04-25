@@ -3,4 +3,10 @@ or omit entirely, and make sure that the bernoulli tests then fail.
 
 Friction test: open channel flow at normal depth. Are slope and depth about right?
 
+Input test: check that bad subcell areas will raise an error.
+
+Input test: check that out of order subedges and subcells do not affect results.
+
+Input test: check that variable subedge length and subcell area are okay.
+
  

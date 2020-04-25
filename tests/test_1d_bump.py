@@ -12,7 +12,9 @@ from matplotlib.widgets import Button
 utils.path("../")
 from swampy import swampy
 import numpy as np
+import six
 
+six.moves.reload_module(swampy)
 ##
 
 class SwampyBump1D(swampy.SwampyCore):
@@ -59,18 +61,34 @@ class SwampyBump1D(swampy.SwampyCore):
         g.add_rectilinear([0,0],[self.L,self.W],
                           self.nx,self.ny)
         g.orient_edges()
-
-        g.add_node_field('node_z_bed',self.z_bed(g.nodes['x']))
-        g.add_cell_field('cell_z_bed',self.z_bed(g.cells_center()))
-
         super(SwampyBump1D,self).set_grid(g)
+        
     def set_initial_conditions(self):
         # allocate:
         super(SwampyBump1D,self).set_initial_conditions()
         
-        self.ic_zi[:]=-self.grd.cells['cell_z_bed']
-        self.ic_ei[:]=np.maximum(self.downstream_eta,-self.ic_zi)
+        self.ic_ei[:]=self.downstream_eta
 
+        for i in range(self.grd.Ncells()):
+            node_x=self.grd.nodes['x'][self.grd.cell_to_nodes(i),0]
+            alpha=(np.arange(self.max_subcells)+0.5)/self.max_subcells
+            x_sub = (1-alpha)*node_x.min() + alpha*node_x.max()
+            y_sub = self.grd.cells_center()[i,1]*np.ones(self.max_subcells)
+
+            self.ic_zi_sub['z'][i,:]=self.z_bed(np.c_[x_sub,y_sub])
+            self.ic_zi_sub['A'][i,:]=self.grd.cells_area()[i]/self.max_subcells
+
+        # So edges can pull agg values
+        self.prepare_cell_subgrid(self.ic_zi_sub)
+
+        e2c=self.grd.edge_to_cells().copy()
+        missing=e2c.min(axis=1)<0
+        e2c[missing,:] = e2c[missing,:].max()
+        
+        z_min=self.zi_agg['min'][e2c].max(axis=1) 
+        self.ic_zj_sub['z'][:,0]=z_min
+        self.ic_zj_sub['l'][:,0]=self.grd.edges_length()
+        
     snap=None
     stop=False
     def snapshot_figure(self,**kwargs):
@@ -90,7 +108,7 @@ class SwampyBump1D(swampy.SwampyCore):
             self.snap['btn'] = Button(axstop, 'Stop')
             self.snap['btn'].on_clicked(stop)
             
-            self.snap['ax'].plot(self.grd.cells_center()[:,0], -self.zi, 'b-o',ms=3)
+            self.snap['ax'].plot(self.grd.cells_center()[:,0], self.zi_agg['min'], 'b-o',ms=3)
             self.snap['t_label']=self.snap['ax'].text(0.05,0.85,'time',
                                                       transform=self.snap['ax'].transAxes)
 
@@ -131,10 +149,13 @@ def calc_Fr_CFL_Bern(sim):
     i_up=np.where(sim.uj>0,
                   sim.grd.edges['cells'][:,0],
                   sim.grd.edges['cells'][:,1])
-    h=sim.hi[ i_up[sim.intern] ] # or mean
+    i_up=i_up[sim.intern]
+
+    ej=sim.ei[i_up]
+    h=ej - sim.zj_agg['min'][sim.intern] 
     Fr=u/np.sqrt(9.8*h)
-    CFL=u*sim.aj[sim.intern]*sim.dt/sim.vi[i_up[sim.intern]]
-    phi=u**2/(2*9.8) + sim.ei[i_up[sim.intern]]
+    CFL=u*sim.aj[sim.intern]*sim.dt/sim.vi[i_up]
+    phi=u**2/(2*9.8) + sim.ei[i_up]
 
     return dict(x=x,xi=xi,Fr=Fr,CFL=CFL,phi=phi,u=u,
                 h=h,ui=ui[:,0])
@@ -194,7 +215,7 @@ def test_high_flow():
     sim.set_bcs()
     sim.run(t_end=30)
         
-if False: # __name__=='__main__':        
+if 1: # __name__=='__main__':        
     # upstream_flow=0.10 will run, but any higher
     # and there is some transient drying that causes an
     # issue.
@@ -204,7 +225,8 @@ if False: # __name__=='__main__':
     # same with dt=0.025
     # dt=0.01 is okay.  Just takes forever.
     sim=SwampyBump1D(cg_tol=1e-10,dt=0.01,
-                     upstream_flow = 0.15)
+                     upstream_flow = 0.05)
+    sim.get_fu=sim.get_fu_no_adv
     sim.set_grid()
     sim.set_initial_conditions()
     sim.set_bcs()
@@ -216,6 +238,6 @@ if False: # __name__=='__main__':
     while sim.t<30 and not sim.stop:
         (hi, uj, tvol, ei) = sim.run_until(sim.t+1.0)
         sim.snapshot_figure()
-        plt.draw()
-        plt.pause(0.01)
+        fig.canvas.draw()
+        fig.canvas.start_event_loop(0.01)
 

@@ -19,9 +19,10 @@ utils.path("../")
 from swampy import swampy
 import numpy as np
 import six
+import nose.tools
 
 six.moves.reload_module(swampy)
-##
+
 
 class SubgridThacker1D(swampy.SwampyCore):
     W=20 # channel width, doesn't matter.
@@ -93,9 +94,6 @@ class SubgridThacker1D(swampy.SwampyCore):
                           self.nx+1,self.ny)
         g.orient_edges()
 
-        #g.add_node_field('node_depth',self.depth_fn(g.nodes['x']))
-        #g.add_cell_field('cell_depth',self.depth_fn(g.cells_center()))
-
         super(SubgridThacker1D,self).set_grid(g)
     def set_initial_conditions(self):
         super(SubgridThacker1D,self).set_initial_conditions()
@@ -139,7 +137,8 @@ class SubgridThacker1D(swampy.SwampyCore):
                 self.ic_zj_sub['z'][j,:]=self.depth_fn(np.c_[x_sub,y_sub]).clip(z_min)
             else: # simplified case for testing basics
                 self.ic_zj_sub['z'][j,:]=self.ic_zi_sub['z'][e2c[j,:],0].max()
-            self.ic_zj_sub['l'][j,:]=ltot[j]/n_subedge
+                
+            self.ic_zj_sub['l'][j,:n_subedge]=ltot[j]/n_subedge
 
     def plot_cell_scalar(self,ax,scal,*a,**kw):
         srcs=[]
@@ -164,8 +163,10 @@ class SubgridThacker1D(swampy.SwampyCore):
 
         self.plot_cell_scalar(ax, self.zi_agg['min'],'b-')
         self.plot_cell_scalar(ax, self.ei, 'g-')
-        #ax.plot(self.grd.cells_center()[:,0],
-        # self.eta_fn(self.grd.cells_center(),self.t),color='orange')
+        ax.plot(self.grd.cells_center()[:,0],
+                np.maximum( self.eta_fn(self.grd.cells_center(),self.t),
+                            self.zi_agg['min']),
+                color='orange')
         return fig
 
 
@@ -180,11 +181,12 @@ def test_1d_thacker_coarse_no_advection():
     sim=SubgridThacker1D(cg_tol=1e-10,nx=50)
     sim.get_fu=sim.get_fu_no_adv
 
+    # With no subgrid, and edges get shallower neighboring cell,
+    # this is stable and gets the same max_rel_error as previous code
     sim.set_grid()
     sim.set_initial_conditions()
     (hi, uj, tvol, ei) = sim.run(t_end=sim.period)
     assert sim.max_rel_error < 0.15, "Regression on relative error %.4f"%sim.max_rel_error
-
 
 def test_1d_thacker_coarse_no_advection_subc10():
     """
@@ -194,19 +196,65 @@ def test_1d_thacker_coarse_no_advection_subc10():
     sim.get_fu=sim.get_fu_no_adv
     sim.max_subcells=10
 
+    # with subcells, this gets some improvement over the no-subgrid case
+    # (not a huge difference, though).
     sim.set_grid()
     sim.set_initial_conditions()
     (hi, uj, tvol, ei) = sim.run(t_end=sim.period)
     # 2020-04-25: max_rel_error 0.0655 
     assert sim.max_rel_error < 0.07, "Regression on relative error %.4f"%sim.max_rel_error
 
-if 0:
-    sim=SubgridThacker1D(cg_tol=1e-10,nx=50,dt=10.0)
+def test_1d_thacker_coarse_no_advection_subc10e10():
+    """
+    Basic test with actual subgrid, cells and edges, though
+    subedges are of no use here.
+    """
+    sim=SubgridThacker1D(cg_tol=1e-10,nx=50)
+    sim.get_fu=sim.get_fu_no_adv
     sim.max_subcells=10
+    sim.max_subedges=10
+
+    sim.set_grid()
+    sim.set_initial_conditions()
+    (hi, uj, tvol, ei) = sim.run(t_end=sim.period)
+    # 2020-04-25: max_rel_error 0.0655 
+    assert sim.max_rel_error < 0.07, "Regression on relative error %.4f"%sim.max_rel_error
+    
+@nose.tools.raises(swampy.SwampyInputError)
+def test_bad_subedge_length():
+    class BadSubedge(SubgridThacker1D):
+        def set_initial_conditions(self):
+            super(BadSubedge,self).set_initial_conditions()
+            # Purposely put bad data into l.
+            self.ic_zj_sub['l'][:,:]=self.grd.edges_length()[:,None]
+
+    sim=BadSubedge(cg_tol=1e-10,nx=50)
+    sim.max_subcells=10
+    sim.max_subedges=10
+    sim.set_grid()
+    sim.set_initial_conditions()
+    # This should raise an exception:
+    sim.prepare_to_run()
+    
+if 0:
+    sim=SubgridThacker1D(cg_tol=1e-10,nx=50,dt=5.0)
+    sim.max_subcells=10
+    sim.max_subedges=10
+    # dt=10.0:
+    # Theta    max rel error
+    # 0.60  => 0.0916
+    # 0.55  => 0.0655 
+    # 0.525 => 0.0541
+    # 0.50  => 0.0532
+    # shorter time step also helps some.
+    sim.theta=0.55
     sim.set_grid()
     sim.set_initial_conditions()
 
     sim.prepare_to_run()
+
+    assert np.allclose( sim.zj_sub['ltot'].max(axis=1), sim.grd.edges_length())
+    assert np.allclose( sim.zi_sub['Atot'].max(axis=1), sim.grd.cells_area())
     
     sim.snapshot_figure()
     plt.draw()
@@ -219,15 +267,3 @@ if 0:
         fig.canvas.draw()
         fig.canvas.start_event_loop(0.01)
         
-# With no subgrid, and edges get shallower neighboring cell,
-# this is stable, but has large errors.
-# Max rms rel error is 2.3363.
-# Note that there is no advection yet.
-# The old code, with advection, got max_rel_error of <0.15
-
-# Clone the old code, run it again to verify the 0.15,
-# then run it without advection.
-# => error with advection: 0.1055
-#    error w/o advection:  0.1080
-
-

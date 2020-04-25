@@ -29,6 +29,21 @@ dc_min = 1.0
 max_sides = 8
 dzmin = 0.001
 
+class SwampyError(Exception):
+    """
+    Superclass for swampy-related errors. Using this 
+    for all errors makes testing more robust
+    """
+    pass
+
+class SwampyInputError(SwampyError):
+    "Inconsistent, invalid, incomplete input data"
+    pass
+
+class SwampyRuntimeError(SwampyError):
+    "Failure to converge, values went nan, etc."
+    pass
+
 class SwampyCore(object):
     # tolerance for conjugate gradient
     cg_tol=1.e-12
@@ -631,6 +646,9 @@ class SwampyCore(object):
         Assume zj_sub_in already np.array( (Ne,max_subedges), zj_sub_dtype),
         with 'z' and 'l' fields populated
         """
+        if not np.allclose( zj_sub_in['l'].sum(axis=1), self.grd.edges_length() ):
+            raise SwampyInputError("Sub-edge lengths do not sum to edge length")
+        
         self.zj_sub=zj_sub_in.copy()
         self.zj_agg=np.zeros(self.nedges,[('min',np.float64), # deepest
                                           ('max',np.float64), # shallowest
@@ -646,6 +664,7 @@ class SwampyCore(object):
             
             self.zj_sub['z'][j,~pop]=np.inf
             order=np.argsort(self.zj_sub['z'][j])
+            npop=pop.sum()
             self.zj_sub['z'][j,:]=self.zj_sub['z'][j,order]
             self.zj_sub['l'][j,:]=self.zj_sub['l'][j,order]
             self.zj_sub['ltot'][j,:]=np.cumsum(self.zj_sub['l'][j,:])
@@ -653,7 +672,7 @@ class SwampyCore(object):
             # A[j,k] is the area up to the kth interface
             # so A[j,0] is always 0.0
             self.zj_sub['Atot'][j,0]=0.0
-            dz=np.diff(self.zj_sub['z'][j])
+            dz=np.diff(self.zj_sub['z'][j,:].clip(-np.inf,zpop.max() ))
             self.zj_sub['Atot'][j,1:]=np.cumsum( dz*self.zj_sub['ltot'][j,:-1] )
         
     def run_until(self,t_end=None,n_steps=None):
@@ -857,7 +876,7 @@ class SwampyCore(object):
                 end = time.time()
                 # print('matrix solve took {0:0.4f} sec'.format(end - start))
                 if success != 0:
-                    raise RuntimeError('Error in convergence of conj grad solver')
+                    raise SwampyRuntimeError('Error in convergence of conj grad solver')
 
                 if wet_only:
                     # to keep the code below undisturbed, expand the wet-only results

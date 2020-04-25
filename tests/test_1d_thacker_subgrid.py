@@ -33,6 +33,9 @@ class SubgridThacker1D(swampy.SwampyCore):
     eta=0.1 # perturbation for initial condition
 
     theta=0.55
+
+    max_subcells=1
+    max_subedges=1
     
     def __init__(self,**kw):
         utils.set_keywords(self,kw)
@@ -95,10 +98,6 @@ class SubgridThacker1D(swampy.SwampyCore):
 
         super(SubgridThacker1D,self).set_grid(g)
     def set_initial_conditions(self):
-        # First testing -- subgrid code, but the same bathy
-        self.max_subcells=1 # each cell divided up into 10
-        self.max_subedges=1 # each cell divided up into 10
-        
         super(SubgridThacker1D,self).set_initial_conditions()
         
         for i in range(self.grd.Ncells()):
@@ -109,9 +108,11 @@ class SubgridThacker1D(swampy.SwampyCore):
 
             self.ic_zi_sub['z'][i,:]=self.depth_fn(np.c_[x_sub,y_sub])
             self.ic_zi_sub['A'][i,:]=self.grd.cells_area()[i]/self.max_subcells
-        
-        self.ic_ei[:]=self.eta_fn(self.grd.cells_center(),t=0)
 
+        # So that we have cell agg values for edges below
+        self.prepare_cell_subgrid(self.ic_zi_sub)
+        self.ic_ei[:]=self.eta_fn(self.grd.cells_center(),t=0)
+        
         # Edges:
         e2c=self.grd.edge_to_cells().copy()
         missing=e2c.min(axis=1)<0
@@ -125,11 +126,17 @@ class SubgridThacker1D(swampy.SwampyCore):
             else:
                 n_subedge=self.max_subedges
 
-            if 0: # the real deal
+            if self.max_subcells>1: # the real deal
                 alpha=(np.arange(n_subedge)+0.5)/n_subedge
                 x_sub = (1-alpha)*node_x[0] + alpha*node_x[1]
                 y_sub = self.grd.edges_center()[j,1]*np.ones(n_subedge)
-                self.ic_zj_sub['z'][j,:]=self.depth_fn(np.c_[x_sub,y_sub])
+
+                # Extra logic to make sure that an edge is not deeper than
+                # the deepest point in either neighboring cell.
+                # Otherwise that neighbor can dry up, but the edge is still
+                # wet.
+                z_min=self.zi_agg['min'][e2c[j,:]].max() 
+                self.ic_zj_sub['z'][j,:]=self.depth_fn(np.c_[x_sub,y_sub]).clip(z_min)
             else: # simplified case for testing basics
                 self.ic_zj_sub['z'][j,:]=self.ic_zi_sub['z'][e2c[j,:],0].max()
             self.ic_zj_sub['l'][j,:]=ltot[j]/n_subedge
@@ -178,9 +185,24 @@ def test_1d_thacker_coarse_no_advection():
     (hi, uj, tvol, ei) = sim.run(t_end=sim.period)
     assert sim.max_rel_error < 0.15, "Regression on relative error %.4f"%sim.max_rel_error
 
-    
+
+def test_1d_thacker_coarse_no_advection_subc10():
+    """
+    Most basic test with actual subgrid, just in cells.
+    """
+    sim=SubgridThacker1D(cg_tol=1e-10,nx=50)
+    sim.get_fu=sim.get_fu_no_adv
+    sim.max_subcells=10
+
+    sim.set_grid()
+    sim.set_initial_conditions()
+    (hi, uj, tvol, ei) = sim.run(t_end=sim.period)
+    # 2020-04-25: max_rel_error 0.0655 
+    assert sim.max_rel_error < 0.07, "Regression on relative error %.4f"%sim.max_rel_error
+
 if 0:
     sim=SubgridThacker1D(cg_tol=1e-10,nx=50,dt=10.0)
+    sim.max_subcells=10
     sim.set_grid()
     sim.set_initial_conditions()
 

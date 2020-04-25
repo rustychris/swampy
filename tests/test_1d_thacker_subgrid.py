@@ -63,7 +63,9 @@ class SubgridThacker1D(swampy.SwampyCore):
             return
         self.last_plot=self.t
 
+        # Have to account for subgrid here.
         eta_soln=self.eta_fn(self.grd.cells_center(),self.t)
+        eta_soln=np.maximum(eta_soln, self.zi_agg['min'])
         eta_errors=self.ei - eta_soln
         eta_stddev=np.std(eta_soln)
         rms_error=np.sqrt( np.mean(eta_errors**2) )
@@ -72,6 +74,7 @@ class SubgridThacker1D(swampy.SwampyCore):
         
     def depth_fn(self,xy):
         return -self.h0 * (1-(xy[:,0]/self.r0)**2)
+    
     def eta_fn(self,xy,t):
         """ 
         Analytical solution for freesurface, used for
@@ -79,10 +82,6 @@ class SubgridThacker1D(swampy.SwampyCore):
         """
         fs= self.eta * self.h0/self.r0*(2*xy[:,0]*np.cos(self.omega*t)
                                         - self.eta*self.r0*np.cos(self.omega*t)**2)
-        # this doesn't work with subgrid -- leaves a bit of water all over the place
-        # since dry eta is defined on subgrid.
-        #bed=self.depth_fn(xy)
-        #return np.maximum(fs,bed)
         return fs
             
     def set_grid(self):
@@ -96,14 +95,12 @@ class SubgridThacker1D(swampy.SwampyCore):
 
         super(SubgridThacker1D,self).set_grid(g)
     def set_initial_conditions(self):
-        # allocate:
-        self.max_subcells=10 # each cell divided up into 10
-        self.max_subedges=10 # each cell divided up into 10
+        # First testing -- subgrid code, but the same bathy
+        self.max_subcells=1 # each cell divided up into 10
+        self.max_subedges=1 # each cell divided up into 10
         
         super(SubgridThacker1D,self).set_initial_conditions()
         
-        # self.ic_zi[:]=-self.grd.cells['cell_depth']
-
         for i in range(self.grd.Ncells()):
             node_x=self.grd.nodes['x'][self.grd.cell_to_nodes(i),0]
             alpha=(np.arange(self.max_subcells)+0.5)/self.max_subcells
@@ -116,6 +113,10 @@ class SubgridThacker1D(swampy.SwampyCore):
         self.ic_ei[:]=self.eta_fn(self.grd.cells_center(),t=0)
 
         # Edges:
+        e2c=self.grd.edge_to_cells().copy()
+        missing=e2c.min(axis=1)<0
+        e2c[missing,:] = e2c[missing,:].max()
+
         ltot=self.grd.edges_length()
         for j in range(self.grd.Nedges()):
             node_x=self.grd.nodes['x'][self.grd.edges['nodes'][j],0]
@@ -123,12 +124,14 @@ class SubgridThacker1D(swampy.SwampyCore):
                 n_subedge=1
             else:
                 n_subedge=self.max_subedges
-                
-            alpha=(np.arange(n_subedge)+0.5)/n_subedge
-            x_sub = (1-alpha)*node_x[0] + alpha*node_x[1]
-            y_sub = self.grd.edges_center()[j,1]*np.ones(n_subedge)
 
-            self.ic_zj_sub['z'][j,:]=self.depth_fn(np.c_[x_sub,y_sub])
+            if 0: # the real deal
+                alpha=(np.arange(n_subedge)+0.5)/n_subedge
+                x_sub = (1-alpha)*node_x[0] + alpha*node_x[1]
+                y_sub = self.grd.edges_center()[j,1]*np.ones(n_subedge)
+                self.ic_zj_sub['z'][j,:]=self.depth_fn(np.c_[x_sub,y_sub])
+            else: # simplified case for testing basics
+                self.ic_zj_sub['z'][j,:]=self.ic_zi_sub['z'][e2c[j,:],0].max()
             self.ic_zj_sub['l'][j,:]=ltot[j]/n_subedge
 
     def plot_cell_scalar(self,ax,scal,*a,**kw):
@@ -157,9 +160,27 @@ class SubgridThacker1D(swampy.SwampyCore):
         #ax.plot(self.grd.cells_center()[:,0],
         # self.eta_fn(self.grd.cells_center(),self.t),color='orange')
         return fig
+
+
+def test_1d_thacker_coarse_no_advection():
+    """
+    Thacker is not a strong test of advection -- here just confirm that
+    the error even with no advection term is still well behaved. This
+    is to (a) demonstrate that we need other tests to confirm advection,
+    and (b) set a baseline for debugging when its helpful to disable advection
+    but still run a wetting/drying case like Thacker.
+    """
+    sim=SubgridThacker1D(cg_tol=1e-10,nx=50)
+    sim.get_fu=sim.get_fu_no_adv
+
+    sim.set_grid()
+    sim.set_initial_conditions()
+    (hi, uj, tvol, ei) = sim.run(t_end=sim.period)
+    assert sim.max_rel_error < 0.15, "Regression on relative error %.4f"%sim.max_rel_error
+
     
-if 1:
-    sim=SubgridThacker1D(cg_tol=1e-10,nx=50,dt=2.0)
+if 0:
+    sim=SubgridThacker1D(cg_tol=1e-10,nx=50,dt=10.0)
     sim.set_grid()
     sim.set_initial_conditions()
 
@@ -169,11 +190,22 @@ if 1:
     plt.draw()
     plt.pause(0.01)
 
-    while sim.t<30.0:
+    while sim.t<sim.period:
         (_, uj, tvol, ei) = sim.run_until(sim.t+sim.dt)
         print("Max rms rel error: %.4f"%sim.max_rel_error)
         fig=sim.snapshot_figure()
         fig.canvas.draw()
         fig.canvas.start_event_loop(0.01)
+        
+# With no subgrid, and edges get shallower neighboring cell,
+# this is stable, but has large errors.
+# Max rms rel error is 2.3363.
+# Note that there is no advection yet.
+# The old code, with advection, got max_rel_error of <0.15
 
-# Failing at the wetting front        
+# Clone the old code, run it again to verify the 0.15,
+# then run it without advection.
+# => error with advection: 0.1055
+#    error w/o advection:  0.1080
+
+

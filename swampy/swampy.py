@@ -12,7 +12,7 @@ import six
 import os
 
 import time
-
+from itertools import chain
 from matplotlib.collections import PolyCollection
 from scipy.spatial.distance import euclidean
 from stompy import utils
@@ -53,6 +53,10 @@ class SwampyCore(object):
 
     max_subcells=10 # can be changed up to set_initial_conditions
     max_subedges=10 # can be changed up to set_initial_conditions
+
+    # When converting an imposed flow Q to edge-normal velocity,
+    # the minimum area, (m2) to use.
+    bc_Q_small_area=0.1
     
     def __init__(self,**kw):
         utils.set_keywords(self,kw)
@@ -352,7 +356,8 @@ class SwampyCore(object):
         # subgrid information for cells is a list of elevation and corresponding area.
         # the slow but clear way:
         Aj=np.zeros(self.nedges,np.float64)
-        for j in self.intern:
+
+        for j in chain(self.bc_Q['j'],self.intern):
             k=np.searchsorted(self.zj_sub['z'][j], # _elevations_ where areas are defined
                               eta_j[j])-1
             if k<0: 
@@ -361,8 +366,9 @@ class SwampyCore(object):
                 dz_partial=(eta_j[j]-self.zj_sub['z'][j,k])
                 assert dz_partial>=0.0
                 Aj[j]=self.zj_sub['Atot'][j,k] + dz_partial*self.zj_sub['ltot'][j,k]
-        return Aj
 
+        return Aj
+    
     def calc_edge_friction(self, uj, aj, hj):
         """
         Calculate friction coef at edge
@@ -418,8 +424,54 @@ class SwampyCore(object):
         # number of valid sides for each cell
         self.ncsides = np.asarray([sum(jj >= 0) for jj in self.grd.cells['edges']])
 
-        return
+        # Used to be in prepare_to_run().
+        # But anything that depends only on the grid should be here
+        self.get_cell_center_spacings() # sets self.dc
+        self.dist = self.edge_to_cen_dist()
+        self.alpha = self.get_alphas_Perot()
+        self.sil = self.get_sign_array()
 
+        # cell center values
+        self.ei = np.zeros(self.ncells, np.float64)  # water surface elevation, cells
+        self.vi = np.zeros(self.ncells, np.float64)  # cell volumes
+        self.pi = np.zeros(self.ncells, np.float64)  # cell wetted areas
+
+        # edge values
+        self.uj = np.zeros(self.nedges, np.float64)  # normal velocity at side
+        self.qj = np.zeros(self.nedges, np.float64)  # normal velocity*h at side
+        self.aj = np.zeros(self.nedges, np.float64)  # edge wet areas
+        self.cf = np.zeros(self.nedges, np.float64)  # edge friction coefs
+        self.zj = np.zeros(self.nedges, np.float64)  # edge depth -- to replace w/subgrid
+        self.cfterm = np.zeros(self.nedges, np.float64)  # edge friction coefs - term for matrices
+
+        # Matrix
+        self.Ai = sparse.dok_matrix( (self.ncells,self.ncells),np.float64) 
+        self.bi = np.zeros(self.ncells, np.float64)
+        self.Ao = sparse.dok_matrix( (self.ncells, self.ncells), np.float64)  # outer iterations
+        self.bo = np.zeros(self.ncells, np.float64)
+        self.x0 = np.zeros(self.ncells, np.float64)
+
+    bc_Q_dtype=[('j',np.int32),
+                ('i',np.int32), # set automatically
+                ('Q',np.float64)]
+    bc_eta_dtype=[('i',np.int32),
+                  ('eta',np.float64)]
+    
+    def set_Q_edge(self,j):
+        if j in self.bc_Q['j']:
+            raise SwampyInputError("set_Q_edge(j=%d): j already in bc_Q"%j)
+        entry=np.zeros((),self.bc_Q_dtype)
+        entry['j']=j
+        entry['i']=self.grd.edges['cells'][j,0] 
+        self.bc_Q=utils.array_append(self.bc_Q,entry)
+
+    def set_eta_cell(self,i):
+        if i in self.bc_eta['i']:
+            raise SwampyInputError("set_eta_edge(i=%d): i already in bc_eta"%i)
+        entry=np.zeros((),self.bc_eta_dtype)
+        entry['i']=i
+        self.bc_eta=utils.array_append(self.bc_eta,entry)
+        
     def get_cell_center_spacings(self):
         """
         Return cell center spacings
@@ -531,60 +583,26 @@ class SwampyCore(object):
         # PRECOMPUTE CONSTANTS
         self.gdt2theta2 = g * (self.dt*self.theta)**2 
 
-        self.get_cell_center_spacings() # sets self.dc
-        self.dist = self.edge_to_cen_dist()
-        self.alpha = self.get_alphas_Perot()
-        self.sil = self.get_sign_array()
         # lij = self.get_side_num_of_cell()
+
+        # Boundary conditions:
+        # flow rate [m3/s] defined on external edges
+        self.bc_Q=np.zeros(0,self.bc_Q_dtype)
+        # freesurface: Any cell can have a forced freesurface
+        self.bc_eta=np.zeros(0,self.bc_eta_dtype)
+        for bc in self.bcs:
+            bc.set_up_model(self)
 
         # edge length divided by center spacing
         # len_dc_ratio = np.divide(self.len, dc)
-
-        # cell center values
-        # self.hi = np.zeros(self.ncells, np.float64)  # total depth
-        # self.zi = np.zeros(self.ncells, np.float64)  # bed elevation, measured positive down. replace w/subgrid
-        self.ei = np.zeros(self.ncells, np.float64)  # water surface elevation, cells
-        self.vi = np.zeros(self.ncells, np.float64)  # cell volumes
-        self.pi = np.zeros(self.ncells, np.float64)  # cell wetted areas
-
-        # edge values
-        self.uj = np.zeros(self.nedges, np.float64)  # normal velocity at side
-        self.qj = np.zeros(self.nedges, np.float64)  # normal velocity*h at side
-        self.aj = np.zeros(self.nedges, np.float64)  # edge wet areas
-        self.cf = np.zeros(self.nedges, np.float64)  # edge friction coefs
-        self.zj = np.zeros(self.nedges, np.float64)  # edge depth -- to replace w/subgrid
-        self.cfterm = np.zeros(self.nedges, np.float64)  # edge friction coefs - term for matrices
-
-        # Matrix
-        # np.zeros((ncells, ncells), np.float64)  # inner iterations
-        self.Ai = sparse.dok_matrix( (self.ncells,self.ncells),np.float64) 
-        self.bi = np.zeros(self.ncells, np.float64)
-        self.Ao = sparse.dok_matrix( (self.ncells, self.ncells), np.float64)  # outer iterations
-        self.bo = np.zeros(self.ncells, np.float64)
-        self.x0 = np.zeros(self.ncells, np.float64)
-
-        # short vars for grid
-        # self.area = self.grd.cells['_area']
 
         # set initial conditions
         self.prepare_cell_subgrid(self.ic_zi_sub)
         self.prepare_edge_subgrid(self.ic_zj_sub)
         
         self.ei[:] = np.maximum(self.ic_ei[:],self.zi_agg['min']) # RH: prop up to at least deepest point
-        # FIX - unsure of correct definition of hi 
-        # self.hi[:] = self.ei - self.zi_agg['min'] # update total depth. assume ei is valid, so no clipping here.
-        # assert np.all(self.hi>=0.0)
-        self.vi[:] = self.calc_volume(self.ei)
+        self.update_geometry(self.ei,self.uj)
                       
-        self.eta_cells={}
-        self.eta_mask=np.zeros( self.ncells, np.bool8)
-        for bc in self.bcs:
-            if isinstance(bc,StageBC):
-                for c in bc.cells(self):
-                    self.eta_cells[c]=bc # doesn't matter what the value is
-                    self.eta_mask[c]=True
-        log.info("Total of %d stage BC cells"%len(self.eta_cells))
-
     zi_sub_dtype=[ ('z',np.float64), # positive UP
                    ('A',np.float64), # area exactly at this elevation
                    ('Atot',np.float64), # net wet area at this interface
@@ -674,7 +692,25 @@ class SwampyCore(object):
             self.zj_sub['Atot'][j,0]=0.0
             dz=np.diff(self.zj_sub['z'][j,:].clip(-np.inf,zpop.max() ))
             self.zj_sub['Atot'][j,1:]=np.cumsum( dz*self.zj_sub['ltot'][j,:-1] )
-        
+
+
+    def update_geometry(self,ei,uj):
+        """
+        Update cell volume, area, edge area, friction terms
+        based on freesurface and edge velocity
+        """
+        # hjstar = self.calc_hjstar(self.ei, self.uj)
+        # hjbar = self.calc_hjbar(self.ei)
+        # hjtilde = self.calc_hjtilde(self.ei)
+        self.vi[:] = self.calc_volume(ei)
+        self.pi[:] = self.calc_wetarea(ei)
+
+        eta_j=self.cell_to_edge_upwind(cell_data=ei,
+                                       u_j=uj,tie='max')
+        self.aj[:] = self.calc_edge_wetarea(eta_j)
+        self.cf[:] = self.calc_edge_friction(uj, self.aj, self.aj/self.len)
+        self.cfterm[:] = 1. / (1. + self.dt * self.cf[:])
+
     def run_until(self,t_end=None,n_steps=None):
         dt=self.dt
         if t_end is not None:
@@ -690,35 +726,25 @@ class SwampyCore(object):
         sil=self.sil
         # hi=self.hi 
         ncells=self.ncells
-        eta_cells=self.eta_cells
         cfterm=self.cfterm
 
-        def update_geometry(ei,uj):
-            """
-            Update cell volume, area, edge area, friction terms
-            based on freesurface and edge velocity
-            """
-            # hjstar = self.calc_hjstar(self.ei, self.uj)
-            # hjbar = self.calc_hjbar(self.ei)
-            # hjtilde = self.calc_hjtilde(self.ei)
-            self.vi[:] = self.calc_volume(ei)
-            self.pi[:] = self.calc_wetarea(ei)
-
-            eta_j=self.cell_to_edge_upwind(cell_data=ei,
-                                           u_j=uj,tie='max')
-            self.aj[:] = self.calc_edge_wetarea(eta_j)
-            self.cf[:] = self.calc_edge_friction(uj, self.aj, self.aj/self.len)
-            self.cfterm[:] = 1. / (1. + self.dt * self.cf[:])
-
-        update_geometry(ei,uj)
+        self.update_geometry(ei,uj)
         
         # change code to vector operations at some point
         # time stepping loop
         tvol = np.zeros(n_steps)
         for n in range(n_steps):
+            t_step_start=self.t
             self.t+=dt # update model time
+            t_step_end=self.t
+            
             log.info('step %d/%d  t=%.3fs'%(n+1,n_steps,self.t))
 
+            self.update_bcs(t_step_start,t_step_end)
+            eta_bc_mask=np.zeros(self.ncells,np.bool8)
+            eta_bc_mask[self.bc_eta['i']]=True
+            comp_eta_cells=np.nonzero(~eta_bc_mask)[0] # cells where eta is computed
+            
             # G: explicit baroptropic term, advection term
             fu=np.zeros_like(uj)
             fu[self.intern]=uj[self.intern]
@@ -753,7 +779,7 @@ class SwampyCore(object):
             self.bi[:] = 0.
 
             for i in range(self.ncells):
-                if i in self.eta_cells: # line profiling may show that this is slow
+                if eta_bc_mask[i]:
                     # Ai[i,i]=1.0
                     Ai_rows.append(i) 
                     Ai_cols.append(i)
@@ -800,36 +826,20 @@ class SwampyCore(object):
 
                     #for i in range(ncells):
                     #    Ao[i, i] += pi[i]
-                    non_eta=np.nonzero(~self.eta_mask)[0]
-                    Ao_rows.extend(non_eta)
-                    Ao_cols.extend(non_eta)
-                    Ao_data.extend(self.pi[~self.eta_mask])
+                    Ao_rows.extend(comp_eta_cells)
+                    Ao_cols.extend(comp_eta_cells)
+                    Ao_data.extend(self.pi[comp_eta_cells])
                     # Ao[~eta_mask,~eta_mask] += pi[~eta_mask]
 
                     Ao=sparse.coo_matrix( (Ao_data,(Ao_rows,Ao_cols)), (ncells,ncells), dtype=np.float64)
                     Ao=Ao.tocsr()
                     Ao=Ai+Ao
 
-                #for i in range(ncells):
-                #    bo[i] = vi[i] + np.dot(Ai[i, :], ei[:]) - bi[i]
                 self.bo[:] = self.vi + Ai.dot(self.ei) - self.bi
+                self.bo[self.bc_eta['i']]=0. # no correction
 
-                self.bo[self.eta_mask]=0. # no correction
-
-                for bc in self.bcs:
-                    if isinstance(bc,StageBC):
-                        c,e,h=bc.cell_edge_eta(self)
-                        ei[c]=h
-                    elif isinstance(bc,FlowBC):
-                        # flow bcs:
-                        c,e,Q=bc.cell_edge_flow(self)
-                        self.bo[c] += -dt * Q
-
-                # For thacker we spend a lot of time here (30%)
-                # initial matrix has 680/2000 zeros on the diagonal --
-                # seems like a lot.  Nonzero elements range from 56 to 7600.
-                # also 680 zeros on the rhs.
-                # So this thing is massively singular.
+                ei[self.bc_eta['i']]=self.bc_eta['eta']
+                self.bo[self.bc_Q['i']] += -dt * self.bc_Q['Q']
 
                 wet_only=0
                 if wet_only: # limit matrix solve to wet cells
@@ -915,7 +925,7 @@ class SwampyCore(object):
             # DBG: temporary check
             assert np.abs(self.uj).max() < 20.0
 
-            update_geometry(ei=self.ei,uj=self.uj)
+            self.update_geometry(ei=self.ei,uj=self.uj)
 
             self.postcalc_update_bc_velocity()
             
@@ -926,28 +936,47 @@ class SwampyCore(object):
 
         return None, uj, tvol, ei
 
+    def update_bcs(self,t_step_start,t_step_end):
+        """
+        Can override in subclasses. 
+        For the time step spanning t_step_start to t_step_end
+        Should update bc_Q['Q'], bc_eta['eta']
+
+        Default implementation here will likely change as 'driver'
+        code is separated from 'model' code.
+        """
+        eta_i=0
+        Q_i=0
+                    
+        for bc in self.bcs:
+            if isinstance(bc,StageBC):
+                c,e,z=bc.cell_edge_eta()
+                for c,z in zip(c,z):
+                    assert self.bc_eta['i'][eta_i]==c
+                    self.bc_eta['eta'][eta_i]=z
+                    eta_i+=1
+            elif isinstance(bc,FlowBC):
+                c,e,Q=bc.cell_edge_flow()
+                for j,jQ in zip(e,Q):
+                    assert self.bc_Q['j'][Q_i]==j
+                    self.bc_Q['Q'][Q_i]=jQ
+                    Q_i+=1
+
+        assert eta_i==len(self.bc_eta)
+        assert Q_i==len(self.bc_Q)
+        
     def postcalc_update_bc_velocity(self):
         """
         After the calculation of computational edges, update self.uj
         for BC edges where possible.  Currently leaves stage bcs
         alone, and just fills in velocity for flow bcs.
         """
-        for bc in self.bcs:
-            if isinstance(bc,StageBC):
-                # not yet defined how edge adjacent to stage BC should be
-                # handled.  Leave as zero.
-                pass 
-            elif isinstance(bc,FlowBC):
-                c,e,Q=bc.cell_edge_flow(self)
-                for j,q in zip(e,Q):
-                    if Q==0.0: continue
-                    a=self.aj[j]
-                    if a<bc.small_area:
-                        log.warning("Setting BC velocity, very small area will be clipped to %.4e"%bc.small_area)
-                        a=bc.small_area
-                    # the negative sign due to convention that boundary edges have outward pointing normal
-                    # but boundary condition supplies inflow=positive q.
-                    self.uj[j] = -q/a
+        J=self.bc_Q['j']
+        Q=self.bc_Q['Q']
+
+        # negative sign due to convention that boundary edges have outward pointing normal
+        # but boundary condition supplies inflow=positive q.
+        self.uj[J]=-Q / self.aj[J].clip(self.bc_Q_small_area)
 
     def get_edge_x_vel(self, uj):
         """
@@ -1006,6 +1035,7 @@ class SwampyCore(object):
 #   and upstream, sets a flow boundary in the rhs.
 
 class BC(object):
+    model=None
     _cells=None
     _edges=None
     geom=None
@@ -1013,43 +1043,52 @@ class BC(object):
         utils.set_keywords(self,kw)
     def update_matrix(self,model,A,b):
         pass
-    def cells(self,model):
+    def cells(self):
         if self._cells is None:
-            self.set_elements(model)
+            self.set_elements()
         return self._cells
-    def edges(self,model):
+    def edges(self):
         if self._edges is None:
-            self.set_elements(model)
+            self.set_elements()
         return self._edges
-    def set_elements(self,model):
+    def set_elements(self):
         cell_hash={}
         edges=[]
-        for j in model.grd.select_edges_by_polyline(self.geom):
-            c=model.grd.edges['cells'][j,0]
+        for j in self.model.grd.select_edges_by_polyline(self.geom):
+            c=self.model.grd.edges['cells'][j,0]
             if c in cell_hash:
                 print("Skipping BC edge %d because its cell is already counted with a different edge"%j)
                 continue
             cell_hash[c]=j
             edges.append(j)
         self._edges=np.array(edges)
-        self._cells=model.grd.edges['cells'][self._edges,0]
+        self._cells=self.model.grd.edges['cells'][self._edges,0]
         assert len(self._cells)==len(np.unique(self._cells))
-    def plot(self,model):
-        model.grd.plot_edges(color='k',lw=0.5)
-        model.grd.plot_edges(color='m',lw=4,mask=self.edges(model))
-        model.grd.plot_cells(color='m',alpha=0.5,mask=self.cells(model))
+        
+    def plot(self):
+        self.model.grd.plot_edges(color='k',lw=0.5)
+        self.model.grd.plot_edges(color='m',lw=4,mask=self.edges())
+        self.model.grd.plot_cells(color='m',alpha=0.5,mask=self.cells())
+
+    def set_up_model(self,model):
+        """
+        Called once.  Can guarantee that the model has a grid. At
+        this point nothing else is guaranteed. Subclasses should 
+        initialize Q/eta edges/cells as needed here.
+        """
+        self.model=model
 
 class FlowBC(BC):
     """
     Represents a flow in m3/s applied across a set of boundary
     edges.
 
-    Positive Q is into the domain.  
+    Positive Q is into the domain.
     """
     Q=None
     ramp_time=0.0
     small_area=1e-6
-    def cell_edge_flow(self,model):
+    def cell_edge_flow(self):
         """
         return a tuple: ( array of cell indices,
                           array of edge indices,
@@ -1058,37 +1097,40 @@ class FlowBC(BC):
         The sign of the flow is positive into the domain, even though
         the edge normals are pointing out of the domain.
         """
-        c=self.cells(model)
-        e=self.edges(model)
+        c=self.cells()
+        e=self.edges()
         # assumes that flow boundary eta is same as interior
         # cell
-        if model.t<self.ramp_time:
-            ramp=model.t/self.ramp_time
+        if self.model.t<self.ramp_time:
+            ramp=self.model.t/self.ramp_time
         else:
             ramp=1.0
 
-        per_edge_A=model.aj[e]
-        if per_edge_A.sum() < self.small_area:
-            log.warning("FlowBC: area sum is 0.")
-            
-        per_edge_Q=self.Q*per_edge_A/max(self.small_area,per_edge_A.sum())
-        return c,e,per_edge_Q*ramp
+        per_edge_A=self.model.aj[e]
         
-    def apply_bc(self,model,A,b):
-        c,e,Q=self.cell_edge_flow(model)
-        # used to be model.area[c]
-        # TODO: now that wet area=pi is dynamic, is this still the correct
-        # way to set the BC?  What happens when pi is updated?
-        b[c] += model.dt / max(self.small_area,model.pi[c]) * Q
+        # Allow some edges to be completely dry.  But if no edges have
+        # significant wet area, flow is split evenly.
+        # With the current calc_edge_wetarea code, this doesn't
+        # allow inflow edges to go dry. FIX.
+        if not np.any(per_edge_A) > self.small_area:
+            log.warning("FlowBC: areas are small.")
+            per_edge_A=np.ones_like(per_edge_A)
+            
+        per_edge_Q=self.Q*per_edge_A/per_edge_A.sum()
+        return c,e,per_edge_Q*ramp
 
+    def set_up_model(self,model):
+        super(FlowBC,self).set_up_model(model)
+        for j in self.edges():
+            model.set_Q_edge(j)
+    
 class StageBC(BC):
-    h=None
-    def apply_bc(self,model,A,b):
-        c=self.cells(model)
-        # changes to A are no in the loop above in SWAMPY
-        #A[c, :] = 0.
-        #A[c, c] = 1.
-        b[c] = self.h
-    def cell_edge_eta(self,model):
-        c=self.cells(model)
-        return c,None,self.h*np.ones_like(c)
+    z=None
+    def cell_edge_eta(self):
+        c=self.cells()
+        return c,None,self.z*np.ones_like(c)
+    
+    def set_up_model(self,model):
+        super(StageBC,self).set_up_model(model)
+        for i in self.cells():
+            model.set_eta_cell(i)

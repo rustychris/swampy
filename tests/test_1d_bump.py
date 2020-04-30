@@ -14,11 +14,11 @@ from swampy import swampy
 import numpy as np
 import six
 
+from test_common import calc_Fr_CFL_Bern
 six.moves.reload_module(swampy)
-##
+#
 
 class SwampyBump1D(swampy.SwampyCore):
-    use_contract_factor = True
     downstream_eta = 0.33
     upstream_flow = 0.12 # m2/s
 
@@ -32,7 +32,6 @@ class SwampyBump1D(swampy.SwampyCore):
      
     def __init__(self,**kw):
         utils.set_keywords(self,kw)
-
         super(SwampyBump1D,self).__init__(**kw)
 
     last_plot=-1000000
@@ -83,9 +82,9 @@ class SwampyBump1D(swampy.SwampyCore):
 
         e2c=self.grd.edge_to_cells().copy()
         missing=e2c.min(axis=1)<0
-        e2c[missing,:] = e2c[missing,:].max()
+        e2c[missing,:] = e2c[missing,:].max(axis=1)[:,None]
         
-        z_min=self.zi_agg['min'][e2c].max(axis=1) 
+        z_min=self.zi_agg['min'][e2c].max(axis=1)
         self.ic_zj_sub['z'][:,0]=z_min
         self.ic_zj_sub['l'][:,0]=self.grd.edges_length()
         
@@ -127,12 +126,16 @@ class SwampyBump1D(swampy.SwampyCore):
         ax2.plot(nondims['x'],
                  nondims['CFL'],
                  label='CFL')
+        ax2.plot(nondims['x'],
+                 nondims['phi'] / nondims['phi'].mean(),
+                 label='phi')
         ax2.legend(loc='upper right')
+        return self.snap['fig']    
 
     def set_bcs(self):
         self.add_bc( swampy.StageBC( geom=[[self.L,0],
                                            [self.L,self.W]],
-                                     h=self.downstream_eta ) )
+                                     z=self.downstream_eta ) )
         self.add_bc( swampy.FlowBC( geom=[[0,0],
                                           [0,self.W]],
                                     Q=self.W*self.upstream_flow ) )
@@ -146,19 +149,17 @@ def calc_Fr_CFL_Bern(sim):
     ui=sim.get_center_vel(sim.uj)
     xi=sim.grd.cells_center()[:,0]
     
-    i_up=np.where(sim.uj>0,
-                  sim.grd.edges['cells'][:,0],
-                  sim.grd.edges['cells'][:,1])
-    i_up=i_up[sim.intern]
-
-    ej=sim.ei[i_up]
-    h=ej - sim.zj_agg['min'][sim.intern] 
-    Fr=u/np.sqrt(9.8*h)
-    CFL=u*sim.aj[sim.intern]*sim.dt/sim.vi[i_up]
-    phi=u**2/(2*9.8) + sim.ei[i_up]
+    ej=sim.cell_to_edge_upwind(sim.ei,sim.uj)[sim.intern]
+    vj=sim.cell_to_edge_upwind(sim.vi,sim.uj)[sim.intern]
+    
+    hj=ej - sim.zj_agg['min'][sim.intern]
+    
+    Fr=u/np.sqrt(9.8*hj)
+    CFL=u*sim.aj[sim.intern]*sim.dt/vj
+    phi=u**2/(2*9.8) + ej
 
     return dict(x=x,xi=xi,Fr=Fr,CFL=CFL,phi=phi,u=u,
-                h=h,ui=ui[:,0])
+                h=hj,ui=ui[:,0])
 
 
 def test_low_flow():
@@ -166,19 +167,31 @@ def test_low_flow():
     bump test case, all subcritical.
     This also tests ramp time for flow bc, conservation of Bernoulli
     """
-    sim=SwampyBump1D(cg_tol=1e-10,dt=0.05,
-                     nx=int(20/0.1),
+    sim=SwampyBump1D(cg_tol=1e-10,dt=0.5,
+                     nx=int(20/0.5),
                      upstream_flow = 0.05)
+    sim.get_fu=sim.get_fu_no_adv
     sim.set_grid()
     sim.set_initial_conditions()
     sim.set_bcs()
     sim.bcs[1].ramp_time=100.0
-    sim.run(t_end=250)
+    sim.prepare_to_run()
+    
+    c,j_Q,Q=sim.bcs[1].cell_edge_flow()
+    
+    assert np.all(sim.aj[j_Q]>0.0)
+
+    sim.run_until(t_end=1400)
+
+    assert np.all(sim.aj[j_Q]>0.0)
     
     V=calc_Fr_CFL_Bern(sim)
     assert V['Fr'].max() < 1.0,"Should be entirely subcritical"
+    # coarse grid, no advection, I get delta of 0.0061 here
+    # so 0.002 is reasonable, though not a really strong check
+    # on advection.
     assert V['phi'].max() - V['phi'].min() < 0.002,"Bernoulli function is too variable"
-    Q=(sim.uj*sim.hjstar)[sim.intern]
+    Q=(sim.uj*sim.aj)[sim.intern]
     assert np.all( np.abs(sim.W*sim.upstream_flow - Q) < 0.002),"Flow not constant"
 
 def test_med_flow():
@@ -224,20 +237,30 @@ if 1: # __name__=='__main__':
     # before things really blow up.
     # same with dt=0.025
     # dt=0.01 is okay.  Just takes forever.
-    sim=SwampyBump1D(cg_tol=1e-10,dt=0.01,
+    sim=SwampyBump1D(cg_tol=1e-10,dt=0.5,
+                     nx=int(20/0.5),
                      upstream_flow = 0.05)
     sim.get_fu=sim.get_fu_no_adv
     sim.set_grid()
     sim.set_initial_conditions()
     sim.set_bcs()
     sim.prepare_to_run()
-    sim.snapshot_figure()
+    fig=sim.snapshot_figure()
     plt.draw()
     plt.pause(0.01)
 
-    while sim.t<30 and not sim.stop:
-        (hi, uj, tvol, ei) = sim.run_until(sim.t+1.0)
+    while sim.t<2000 and not sim.stop:
+        (hi, uj, tvol, ei) = sim.run_until(sim.t+10.0)
         sim.snapshot_figure()
         fig.canvas.draw()
         fig.canvas.start_event_loop(0.01)
+
+# test_low_flow()        
+##
+
+
+plt.figure(2).clf()
+#sim.grd.plot_cells(values=sim.zi_agg['min'],cmap='jet')
+sim.grd.plot_edges(values=sim.zj_agg['min'],cmap='jet')
+plt.axis('equal')
 

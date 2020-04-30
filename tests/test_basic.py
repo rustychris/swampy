@@ -7,6 +7,8 @@ from stompy import utils
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 
+from test_common import calc_Fr_CFL_Bern
+
 # Rather than adding swampy to sys.path, assume this script is run
 # from this folder and add the relative path
 utils.path("../")
@@ -130,44 +132,23 @@ class TwoCell(swampy.SwampyCore):
     def set_bcs(self):
         self.add_bc( swampy.StageBC( geom=[[self.L,0],
                                            [self.L,self.W]],
-                                     h=self.downstream_eta ) )
+                                     z=self.downstream_eta ) )
         self.add_bc( swampy.FlowBC( geom=[[0,0],
                                           [0,self.W]],
                                     Q=self.W*self.upstream_flow ) )
 
-def calc_Fr_CFL_Bern(sim):
-    # To make sure we actually got a hydraulic jump
-    e2c=sim.grd.edge_to_cells()
-    u=sim.uj[sim.intern]
-    x=sim.grd.edges_center()[sim.intern][:,0]
-
-    ui=sim.get_center_vel(sim.uj)
-    xi=sim.grd.cells_center()[:,0]
-    
-    i_up=np.where(sim.uj>0,
-                  sim.grd.edges['cells'][:,0],
-                  sim.grd.edges['cells'][:,1])
-    h=sim.hi[ i_up[sim.intern] ] # or mean
-    Fr=u/np.sqrt(9.8*h)
-
-    v_eps=1e-4 # will show very large CFL when upwind cell is empty.
-    CFL=u*sim.aj[sim.intern]*sim.dt/sim.vi[i_up[sim.intern]].clip(v_eps)
-
-    phi=u**2/(2*9.8) + sim.ei[i_up[sim.intern]]
-
-    return dict(x=x,xi=xi,Fr=Fr,CFL=CFL,phi=phi,u=u,
-                h=h,ui=ui[:,0])
 
 
 def test_basic():
     sim=TwoCell(cg_tol=1e-10,dt=1.0)
+    sim.get_fu = sim.get_fu_no_adv
     sim.set_grid()
     sim.set_initial_conditions()
     sim.set_bcs()
     sim.bcs[1].ramp_time=10.0
     sim.run(t_end=250)
         
-if True: # __name__=='__main__':
+if False: # __name__=='__main__':
     sim=TwoCell(cg_tol=1e-10,dt=1.0)
     sim.set_grid()
     sim.set_initial_conditions()

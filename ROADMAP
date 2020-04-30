@@ -2,10 +2,9 @@ Pass existing tests without caveat - DONE as of 2020-04-18
 Subgrid for edges & cells - BASIC DONE
 
 Verify that bump tests fail with lack of advection
- - update bump test to deal with subgrid specification
-   - currently a disconnect where boundary edges have no area, and
-     so we can't calculate Q there.
-
+ - update bump test to deal with subgrid specification DONE
+ - and it does in fact fail, by a factor of 3ish
+ 
 Add basic upwind momentum advection (roughly what is in Zhao's(sp?) thesis?)
 
 Add 2D test case (parabolic dish)

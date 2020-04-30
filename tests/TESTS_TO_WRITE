@@ -9,4 +9,5 @@ Input test: check that out of order subedges and subcells do not affect results.
 
 Input test: check that variable subedge length and subcell area are okay.
 
- 
+Inflow in partially wet parabolic section, check for no flow on dry edges, and
+flow reasonably split across wet edges

@@ -146,7 +146,7 @@ def calc_Fr_CFL_Bern(sim):
     u=sim.uj[sim.intern]
     x=sim.grd.edges_center()[sim.intern][:,0]
 
-    ui=sim.get_center_vel(sim.uj)
+    ui=sim.get_center_vel(uj=sim.uj)
     xi=sim.grd.cells_center()[:,0]
     
     ej=sim.cell_to_edge_upwind(sim.ei,sim.uj)[sim.intern]
@@ -193,6 +193,17 @@ def test_low_flow():
     assert V['phi'].max() - V['phi'].min() < 0.002,"Bernoulli function is too variable"
     Q=(sim.uj*sim.aj)[sim.intern]
     assert np.all( np.abs(sim.W*sim.upstream_flow - Q) < 0.002),"Flow not constant"
+
+    # basic test that center_vel is not crazy
+    # approximate comparison between edge velocity and the cell-centered
+    # x-velocity averaged from the adjacent cells
+    ui_at_j=V['ui'][ sim.grd.edges['cells'][sim.intern,:] ].mean(axis=1)
+    delta=sim.uj[sim.intern] - ui_at_j
+    ui_rel_difference = np.mean(np.abs(delta)) / np.mean(abs(sim.uj[sim.intern]))
+    # was 0.014 in a quick test
+    assert ui_rel_difference<0.05
+
+## 
 
 def test_med_flow():
     """

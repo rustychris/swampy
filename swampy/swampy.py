@@ -57,6 +57,9 @@ class SwampyCore(object):
     # When converting an imposed flow Q to edge-normal velocity,
     # the minimum area, (m2) to use.
     bc_Q_small_area=0.1
+    # perot velocity calculations will clip the normalizing volume to
+    # this lower bound (m3)
+    perot_small_volume=0.001
     
     def __init__(self,**kw):
         utils.set_keywords(self,kw)
@@ -67,25 +70,34 @@ class SwampyCore(object):
     def add_bc(self,bc):
         self.bcs.append(bc)
 
-    def center_vel_perot(self, i, cell_uj):
+    def center_vel_perot(self, i, uj=None, vi=None, aj=None, dest=None):
         """
         Cell center velocity calculated with Perot dual grid interpolation
         return u center veloctiy vector, {x,y} components, based on
         edge-normal velocities in cell_uj.
         """
-        acu = np.zeros(2, np.float64)
-        uside = np.zeros_like(acu)
-        ucen = np.zeros_like(acu)
-        nsides = len(cell_uj)
+        nsides = self.ncsides[i]
+        acu   = np.zeros(2, np.float64)
+        uside = np.zeros(2, np.float64)
+        
+        if dest is None:
+            dest = np.zeros(2,np.float64) # ucen
+        if uj is None:
+            uj=self.uj
+        if vi is None:
+            vi=self.vi
+        if aj is None:
+            aj=self.aj
+
         for l in range(nsides):
             j = self.grd.cells[i]['edges'][l]
-            for dim in range(2):  # x and y
-                uside[dim] = cell_uj[l] * self.en[j, dim]  # u vel component of normal vel
-                acu[dim] += uside[dim] * self.len[j] * self.dist[i, l]
-        for dim in range(2):  # x and y
-            ucen[dim] = acu[dim] / self.grd.cells['_area'][i]
+            #   m/s    m2 * m
+            # => m^4/s
+            dest[:] += uj[j]*self.en[j,:] * self.aj[j] * self.dist[i, l]
+        # => m/s
+        dest /= max(vi[i],self.perot_small_volume)
 
-        return ucen
+        return dest
 
     def get_center_vel(self, uj):
         """
@@ -93,10 +105,7 @@ class SwampyCore(object):
         """
         ui = np.zeros((self.ncells, 2), np.float64)
         for i in range(self.ncells):
-            nsides = self.ncsides[i]
-            cell_uj=uj[ self.grd.cells['edges'][i,:nsides] ]
-            ui[i] = self.center_vel_perot(i, cell_uj)
-            
+            self.center_vel_perot(i,uj,dest=ui[i,:])
         return ui
 
     def get_fu_no_adv(self, uj, fu, **kw):

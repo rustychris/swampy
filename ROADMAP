@@ -1,13 +1,17 @@
 Pass existing tests without caveat - DONE as of 2020-04-18
 Subgrid for edges & cells - BASIC DONE
 
-Verify that bump tests fail with lack of advection
- - update bump test to deal with subgrid specification DONE
- - and it does in fact fail, by a factor of 3ish
+Verify that bump tests fail with lack of advection DONE
  
-Add basic upwind momentum advection (roughly what is in Zhao's(sp?) thesis?)
+Add basic upwind momentum advection (similar to Yun Zhang's dissertation,
+  but upwind instead of centered)
+  - DONE
 
+  What happens with hydraulic jumps?
+  
 Add 2D test case (parabolic dish)
+
+Check for easy speedups
 
 Refactor
 

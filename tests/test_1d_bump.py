@@ -29,24 +29,53 @@ class SwampyBump1D(swampy.SwampyCore):
 
     theta=0.55
     dt=1.0 # fix
-     
+
     def __init__(self,**kw):
         utils.set_keywords(self,kw)
         super(SwampyBump1D,self).__init__(**kw)
 
+        # record timeseries
+        self.history=np.zeros( 0, dtype=[('t',np.float64),
+                                         ('eta_var',np.float64),
+                                         ('Q_max_error',np.float64),
+                                         ('phi_range',np.float64)])
+
     last_plot=-1000000
+    last_uj=None
+    last_ei=None
     def step_output(self,n,ei,**kwargs):
         nondims=calc_Fr_CFL_Bern(self)
         if nondims['CFL'].max()>=0.95:
             self.snapshot_figure()
             self.stop=True
             raise Exception("CFL too high: %.3f"%( nondims['CFL'].max() ))
+
+        self.max_d_uj=self.max_d_eta=0.0
+        if self.last_uj is not None:
+            self.max_d_uj=np.abs((self.uj - self.last_uj)/self.dt).max()
+        if self.last_ei is not None:
+            self.max_d_eta=np.abs( (self.ei - self.last_ei)/self.dt).max()
+        self.last_uj=self.uj.copy()
+        self.last_ei=self.ei.copy()
+
+        self.history=utils.array_append(self.history)
+        self.history['eta_var'][-1]=np.var(self.ei)
+        phi=nondims['phi'][ (nondims['x']>1) & (nondims['x']<19)]
+        self.history['phi_range'][-1]=phi.max() - phi.min()
+        self.history['t'][-1]=self.t
+
+        Qbc=sim.W*sim.upstream_flow
+        Qcalc=(sim.uj*sim.aj)[sim.intern]
+        self.history['Q_max_error'][-1]=np.abs(Qbc-Qcalc).max()
         
         plot_interval=1.0
         if self.t-self.last_plot<plot_interval:
             return
         self.last_plot=self.t
 
+    def report_steadiness(self):
+        print(f"Max du/dt: {self.max_d_uj:0.5f}  Max deta/dt {self.max_d_eta:0.5f}")
+        
     def z_bed(self,xy):
         """ 
         Define bed elevation.  Positive up.
@@ -87,6 +116,11 @@ class SwampyBump1D(swampy.SwampyCore):
         z_min=self.zi_agg['min'][e2c].max(axis=1)
         self.ic_zj_sub['z'][:,0]=z_min
         self.ic_zj_sub['l'][:,0]=self.grd.edges_length()
+        # So we can calculate flows
+
+        flow_A=self.W * (self.ic_ei-self.zi_agg['mean'])
+        ui_tmp=np.array([1,0])[None,:] * (self.upstream_flow / flow_A)[:,None]
+        self.uj[:] = (self.cell_to_edge_interp(ui_tmp) * self.en).sum(axis=1)
         
     snap=None
     stop=False
@@ -99,10 +133,10 @@ class SwampyBump1D(swampy.SwampyCore):
         
         if self.snap is None:
             self.snap={}
-            fig=self.snap['fig']=plt.figure(3)
+            fig=self.snap['fig']=plt.figure(4)
             fig.clf()
-            self.snap['ax']=fig.add_subplot(2,1,1)
-            self.snap['ax2']=fig.add_subplot(2,1,2)
+            self.snap['ax']=fig.add_subplot(3,1,1)
+            self.snap['ax2']=fig.add_subplot(3,1,2)
             axstop         =fig.add_axes([0.8, 0.93, 0.09, 0.06])
             self.snap['btn'] = Button(axstop, 'Stop')
             self.snap['btn'].on_clicked(stop)
@@ -111,6 +145,8 @@ class SwampyBump1D(swampy.SwampyCore):
             self.snap['t_label']=self.snap['ax'].text(0.05,0.85,'time',
                                                       transform=self.snap['ax'].transAxes)
 
+            self.snap['ax_t']=fig.add_subplot(3,1,3)
+            
         ax=self.snap['ax']
         del ax.lines[1:]
         ax.plot(self.grd.cells_center()[:,0], self.ei, 'g-' )
@@ -126,10 +162,19 @@ class SwampyBump1D(swampy.SwampyCore):
         ax2.plot(nondims['x'],
                  nondims['CFL'],
                  label='CFL')
-        ax2.plot(nondims['x'],
-                 nondims['phi'] / nondims['phi'].mean(),
-                 label='phi')
+        ax.plot(nondims['x'],
+                nondims['phi'], # / nondims['phi'].mean(),
+                'r-',
+                label='phi')
+        ax2.axis(ymin=0,ymax=1.05)
         ax2.legend(loc='upper right')
+
+        ax=self.snap['ax_t']
+        ax.cla()
+        ax.plot(self.history['t'],self.history['eta_var'],label='var(eta)')
+        ax.plot(self.history['t'],self.history['Q_max_error'],label='Q nonuniform')
+        ax.plot(self.history['t'],self.history['phi_range'],label='max(phi)-min(phi)')
+        ax.legend(loc='upper right')
         return self.snap['fig']    
 
     def set_bcs(self):
@@ -148,8 +193,11 @@ def calc_Fr_CFL_Bern(sim):
 
     ui=sim.get_center_vel(uj=sim.uj)
     xi=sim.grd.cells_center()[:,0]
-    
-    ej=sim.cell_to_edge_upwind(sim.ei,sim.uj)[sim.intern]
+
+    # TODO: more rigorous choice of ej
+    # ej=sim.cell_to_edge_upwind(sim.ei,sim.uj)[sim.intern]
+    # interp gets a 'better' answer.
+    ej=sim.cell_to_edge_interp(sim.ei)[sim.intern]
     vj=sim.cell_to_edge_upwind(sim.vi,sim.uj)[sim.intern]
     
     hj=ej - sim.zj_agg['min'][sim.intern]
@@ -162,26 +210,37 @@ def calc_Fr_CFL_Bern(sim):
                 h=hj,ui=ui[:,0])
 
 
-def test_low_flow():
+def test_low_flow_no_adv():
+    run_low_flow(advection='no_adv')
+
+def test_low_flow_orig():
+    run_low_flow(advection='orig')
+    
+def run_low_flow(advection='no_adv'):
     """
     bump test case, all subcritical.
-    This also tests ramp time for flow bc, conservation of Bernoulli
     """
-    sim=SwampyBump1D(cg_tol=1e-10,dt=0.5,
-                     nx=int(20/0.5),
+    sim=SwampyBump1D(cg_tol=1e-10,
+                     # nx=int(20/0.5),dt=0.5,
+                     nx=int(20/0.10),dt=0.10,
                      upstream_flow = 0.05)
-    sim.get_fu=sim.get_fu_no_adv
+    if advection=='no_adv':
+        sim.get_fu=sim.get_fu_no_adv
+    elif advection=='orig':
+        sim.get_fu=sim.get_fu_orig
+    else:
+        raise Exception("Bad advection: "+advection)
+    
     sim.set_grid()
     sim.set_initial_conditions()
     sim.set_bcs()
-    sim.bcs[1].ramp_time=100.0
     sim.prepare_to_run()
     
     c,j_Q,Q=sim.bcs[1].cell_edge_flow()
     
     assert np.all(sim.aj[j_Q]>0.0)
 
-    sim.run_until(t_end=1400)
+    sim.run_until(t_end=2000)
 
     assert np.all(sim.aj[j_Q]>0.0)
     
@@ -190,9 +249,20 @@ def test_low_flow():
     # coarse grid, no advection, I get delta of 0.0061 here
     # so 0.002 is reasonable, though not a really strong check
     # on advection.
-    assert V['phi'].max() - V['phi'].min() < 0.002,"Bernoulli function is too variable"
+    # Discard the ends -- maybe once momentum is advected at
+    # boundaries this won't be a problem
+    
+    phi=V['phi'][ (V['x']>1) & (V['x']<19)]
+    
+    adv_passes=(phi.max() - phi.min()) < 0.002
+    print("phi max-min",V['phi'].max()-V['phi'].min())
+    if advection=='no_adv':
+        assert not adv_passes,"Bernoulli function should be variable w/o advection"
+    else:
+        assert adv_passes,"Bernoulli function is too variable"
+
     Q=(sim.uj*sim.aj)[sim.intern]
-    assert np.all( np.abs(sim.W*sim.upstream_flow - Q) < 0.002),"Flow not constant"
+    assert np.all( np.abs(sim.W*sim.upstream_flow - Q) < 0.002),"Flow not uniform"
 
     # basic test that center_vel is not crazy
     # approximate comparison between edge velocity and the cell-centered
@@ -203,11 +273,12 @@ def test_low_flow():
     # was 0.014 in a quick test
     assert ui_rel_difference<0.05
 
-## 
 
 def test_med_flow():
     """
-    Bump test case, small hydraulic jump
+    Bump test case, small hydraulic jump.
+    Just tests for stability, and that flow has 
+    sub - super - sub critical transitions
     """
     # used to be dt=0.04, but that violates CFL
     # condition.
@@ -239,19 +310,14 @@ def test_high_flow():
     sim.set_bcs()
     sim.run(t_end=30)
         
-if 1: # __name__=='__main__':        
+if 0: # __name__=='__main__':        
     # upstream_flow=0.10 will run, but any higher
     # and there is some transient drying that causes an
     # issue.
-    # this must have worked at a point, though.
-    # with upstream flow=0.15, CFL breaks 0.95
-    # before things really blow up.
-    # same with dt=0.025
-    # dt=0.01 is okay.  Just takes forever.
-    sim=SwampyBump1D(cg_tol=1e-10,dt=0.5,
-                     nx=int(20/0.5),
-                     upstream_flow = 0.05)
-    sim.get_fu=sim.get_fu_no_adv
+    sim=SwampyBump1D(cg_tol=1e-10,dt=0.02,
+                     nx=int(20/0.10),
+                     upstream_flow = 0.15)
+    sim.get_fu=sim.get_fu_orig
     sim.set_grid()
     sim.set_initial_conditions()
     sim.set_bcs()
@@ -260,18 +326,16 @@ if 1: # __name__=='__main__':
     plt.draw()
     plt.pause(0.01)
 
-    while sim.t<2000 and not sim.stop:
-        (hi, uj, tvol, ei) = sim.run_until(sim.t+10.0)
+    while sim.t<30 and not sim.stop:
+        (hi, uj, tvol, ei) = sim.run_until(sim.t+2.0)
+        sim.report_steadiness()
         sim.snapshot_figure()
         fig.canvas.draw()
         fig.canvas.start_event_loop(0.01)
+# else:
+#     # Oddly, the Q nonuniformity actually grows over time
+#     # in this run. Maybe some residual in cg?
+#     test_low_flow_no_adv() # phi diff 0.00648
+#     test_low_flow_orig()   #          0.0010
 
-# test_low_flow()        
-##
-
-
-plt.figure(2).clf()
-#sim.grd.plot_cells(values=sim.zi_agg['min'],cmap='jet')
-sim.grd.plot_edges(values=sim.zj_agg['min'],cmap='jet')
-plt.axis('equal')
 

@@ -155,7 +155,7 @@ class SwampyCore(object):
         Mci*=vfac[:,None]
 
         du_dt_j = (self.cell_to_edge_interp(Mci) * self.en).sum(axis=1)
-        fu[self.intern] += self.dt*du_dt_j[self.intern]
+        fu[self.intern] += self.dt*du_dt_j[self.intern] * (self.aj[self.intern]>0)
 
         return fu
 

@@ -64,8 +64,8 @@ class SwampyBump1D(swampy.SwampyCore):
         self.history['phi_range'][-1]=phi.max() - phi.min()
         self.history['t'][-1]=self.t
 
-        Qbc=sim.W*sim.upstream_flow
-        Qcalc=(sim.uj*sim.aj)[sim.intern]
+        Qbc=self.W*self.upstream_flow
+        Qcalc=(self.uj*self.aj)[self.intern]
         self.history['Q_max_error'][-1]=np.abs(Qbc-Qcalc).max()
         
         plot_interval=1.0
@@ -155,7 +155,7 @@ class SwampyBump1D(swampy.SwampyCore):
 
         ax2=self.snap['ax2']
         ax2.cla()
-        nondims=calc_Fr_CFL_Bern(sim)
+        nondims=calc_Fr_CFL_Bern(self)
         ax2.plot(nondims['x'],
                  nondims['Fr'],
                  label='Fr')

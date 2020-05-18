@@ -16,13 +16,11 @@ import numpy as np
 import six
 import nose.tools
 
-six.moves.reload_module(swampy)
 six.moves.reload_module(unstructured_grid)
+six.moves.reload_module(swampy)
 ## 
 
-R=500e3
-
-six.moves.reload_module(unstructured_grid)
+R=480e3
 
 def thacker_grid():
     thacker_2d_fn='thacker2d-%g.nc'%R
@@ -62,12 +60,18 @@ class Thacker2D(swampy.SwampyCore):
 
     max_subcells=1
     max_subedges=1
+
+    sector_grid=False
+    # if using sector grid,how many nodes in the radial direction
+    sector_grid_N=21
     
     f=0 # no Coriolis yet
     d0=50 # m,aka h0?
     eta0=2 # m
     omega=2*np.pi/43200 # rad/s
     dt=112.5
+
+    fig_num=1
     
     def __init__(self,**kw):
         utils.set_keywords(self,kw)
@@ -143,9 +147,34 @@ class Thacker2D(swampy.SwampyCore):
         r=utils.mag(xy)
         _,_,eta = self.analytical_ur_utan_eta(r,t)
         return eta
-            
+
+    def make_sector_grid(self):
+        g=unstructured_grid.UnstructuredGrid(max_sides=4)
+        g.add_rectilinear([-R,-1], [R,1], nx=2*self.sector_grid_N-1, ny=2)
+        sector_angle=2*np.pi / 128
+        
+        n=g.select_nodes_nearest([0,1]) # will delete this
+        n2=g.select_nodes_nearest([0,-1]) # and make triangles with this
+        nbrs=g.node_to_nodes(n)
+        
+        g.delete_node_cascade(n)
+        for nbr in nbrs:
+            if nbr!=n2:
+                g.add_edge(nodes=[nbr,n2])
+        
+        g.nodes['x'][:,1] = g.nodes['x'][:,1] * g.nodes['x'][:,0]*np.sin(sector_angle/2)
+        g.make_cells_from_edges()
+        g.renumber()
+        g.edge_to_cells(recalc=True)
+        g.cells_center(refresh=True)
+        
+        return g
+    
     def set_grid(self):
-        g=thacker_grid()
+        if self.sector_grid:
+            g=self.make_sector_grid()
+        else:
+            g=thacker_grid()
         g.orient_edges()
 
         super().set_grid(g)
@@ -156,16 +185,29 @@ class Thacker2D(swampy.SwampyCore):
         tran_cells=self.grd.select_cells_intersecting(tran,as_type='indices')
         cc=self.grd.cells_center()[tran_cells]
         order=np.argsort(cc[:,0])
+        # just centers
         self.tran_cells=np.array(tran_cells)[order]
         self.tran_x=cc[order,0]
+        if 1: # expand to segments:
+            # goofy - we don't have proper slicing, so use min/max x coord
+            # of each cell, with nan to hide the the transition
+            xs=[self.grd.nodes['x'][self.grd.cell_to_nodes(c),0] for c in self.tran_cells]
+            self.tran_segx=np.array( [ xx for x in xs for xx in [x.min(),x.max()]] )
+            self.tran_segcells=np.repeat(self.tran_cells,2)
 
-    def set_initial_conditions(self):
-        super().set_initial_conditions()
+        # get edges intersected
+        self.tran_j=self.grd.select_edges_intersecting(tran,as_type='indices')
+        self.tran_jx=self.grd.edges_center()[self.tran_j,0]
 
-        self.history_cells=[self.grd.select_cells_nearest(p)
-                            for p in [ [1,1],
-                                       [0.5*self.L,1],
-                                       [0.9*self.L,1]] ]
+    def init_history(self):
+        L_zhang=610e3
+        history_radii=[self.L*300e3/L_zhang,
+                       # self.L*610e3/L_zhang # this is what Zhang reports, but for me that's dry
+                       self.L*590e3/L_zhang
+                       ]
+        # The y=1 bit is to help get fully into a cell
+        self.history_cells=[self.grd.select_cells_nearest([r,1])
+                            for r in history_radii ]
         self.history_r=utils.mag( self.grd.cells_center()[self.history_cells,:] )
         Nh=len(self.history_cells)
         self.history=np.zeros( 0, [ ('t',np.float64),
@@ -174,6 +216,11 @@ class Thacker2D(swampy.SwampyCore):
                                     ('ur_model',np.float64,Nh),
                                     ('ur_ana',np.float64,Nh)])
         
+    def set_initial_conditions(self):
+        super().set_initial_conditions()
+
+        self.init_history()
+
         # no subgrid yet
         cc=self.grd.cells_center()
         zi=self.depth_fn(cc)
@@ -185,51 +232,92 @@ class Thacker2D(swampy.SwampyCore):
         self.ic_ei[:]=self.eta_fn(self.grd.cells_center(),t=0)
         
         # Edges:
-        e2c=self.grd.edge_to_cells().copy()
-        missing=e2c.min(axis=1)<0
-        e2c[missing,:] = e2c[missing,:].max()
-
         ltot=self.grd.edges_length()
-        n_subedge=1
-        for j in range(self.grd.Nedges()):
-            # simplified case for testing basics
-            self.ic_zj_sub['z'][j,:]=self.ic_zi_sub['z'][e2c[j,:],0].max()
-            self.ic_zj_sub['l'][j,:n_subedge]=ltot[j]/n_subedge
+        if 1:
+            # Direct, no subedge, no constrain for neighboring
+            # cell
+            ec=self.grd.edges_center()
+            self.ic_zj_sub['z'][:,0]=self.depth_fn(ec)
+            self.ic_zj_sub['l'][:,0]=ltot
 
-    def snapshot_figure(self,**kwargs):
+            if 1: # Furthermore, go back and update cells to be at least
+                assert self.max_subcells==1,"Bathy approach not ready for subgrid"
+                # as deep as neighboring edge
+                self.prepare_edge_subgrid(self.ic_zj_sub)
+                for c in range(self.ncells):
+                    for j in self.grd.cell_to_edges(c):
+                        if self.ic_zi_sub['z'][c,0]>self.ic_zj_sub['z'][j,0]:
+                            self.ic_zi_sub['z'][c,0] = self.ic_zj_sub['z'][j,0]
+        else:
+            # Set edge to shallower cell neighbor.
+            # Safer but gives poor results.
+            e2c=self.grd.edge_to_cells().copy()
+            missing=e2c.min(axis=1)<0
+            e2c[missing,:] = e2c[missing,:].max()
+
+            n_subedge=1
+            for j in range(self.grd.Nedges()):
+                self.ic_zj_sub['z'][j,:]=self.ic_zi_sub['z'][e2c[j,:],0].max()
+                self.ic_zj_sub['l'][j,:n_subedge]=ltot[j]/n_subedge
+
+    def snapshot_figure(self,update=False,**kwargs):
         """
         Plot current model state with solution
         """
-        fig=plt.figure(1)
-        fig.clf()
-        gs=gridspec.GridSpec(2,2)
+        if not update:
+            self.fig=fig=plt.figure(self.fig_num)
+            fig.clf()
+            gs=gridspec.GridSpec(2,2)
+            ax=fig.add_subplot(gs[0,0])
+
+        if update:
+            self.ccoll.set_array(self.ei)
+        else:
+            self.ccoll=self.grd.plot_cells(ax=ax, values=self.ei,cmap='jet',clim=[-2.5,2.5])
+
+        if not update:
+            ax.axis([-R,R,-R,R])
+            plt.colorbar(self.ccoll)
+            axt=fig.add_subplot(gs[1,:])
+
+        ui=self.get_center_vel(self.uj)
+            
+        if update:
+            self.ei_lines[0].set_ydata(self.ei[self.tran_segcells])
+            self.ui_lines[0].set_ydata(ui[self.tran_segcells,0])
+            self.uj_dots[0].set_ydata((self.en[:,0]*self.uj)[self.intern])
+        else:
+            self.ei_lines=axt.plot(self.tran_segx,self.ei[self.tran_segcells],'b-',label='e-Model')
+            self.ui_lines=axt.plot(self.tran_segx,ui[self.tran_segcells,0],'m-',label='u-Model')
+            if self.sector_grid:
+                ec=self.grd.edges_center()
+                self.uj_dots=axt.plot(ec[self.intern,0],(self.en[:,0]*self.uj)[self.intern],'m.')
+            self.zi_lines=axt.plot(self.tran_segx,self.zi_agg['min'][self.tran_segcells],'k-')
+            self.zj_dots=axt.plot(self.tran_jx,self.zj_agg['min'][self.tran_j],'k.')
+
+        urad,utan,eta=self.analytical_ur_utan_eta(r=np.abs(self.tran_x),t=self.t)
+        urad[ self.tran_x<0 ] *= -1
         
-        ax=fig.add_subplot(gs[0,0])
+        eta_soln=np.maximum(eta,self.zi_agg['min'][self.tran_cells])
 
-        ccoll=self.grd.plot_cells(ax=ax, values=self.ei,cmap='jet')
-        ax.axis([-R,R,-R,R])
-        plt.colorbar(ccoll)
+        if update:
+            self.soln_lines[0].set_ydata(eta_soln)
+            self.urad_lines[0].set_ydata(urad)
+        else:
+            self.soln_lines=axt.plot(self.tran_x,eta_soln,'b-',lw=3,alpha=0.5,label='e-soln')
+            self.urad_lines=axt.plot(self.tran_x,urad,'m-',lw=3,alpha=0.5,label='u-soln')
+            axt.axis(ymin=-3,ymax=3)
+            axt.legend(loc='lower right')
 
-        axt=fig.add_subplot(gs[1,:])
-        axt.plot(self.tran_x,self.ei[self.tran_cells],label='Model')
-        axt.plot(self.tran_x,self.zi_agg['min'][self.tran_cells])
-
-        _,_,eta=self.analytical_ur_utan_eta(r=np.abs(self.tran_x),t=self.t)
-        axt.plot(self.tran_x,np.maximum(eta,self.zi_agg['min'][self.tran_cells]),
-                 'r-',label='Soln')
-        axt.axis(ymin=-3,ymax=3)
-        axt.legend(loc='lower right')
-
-        axts=fig.add_subplot(gs[0,1])
+        if not update:
+            self.axts=fig.add_subplot(gs[0,1])
+        self.axts.cla()
         for i,r in enumerate(self.history_r):
-            l=axts.plot(self.history['t'],
-                      self.history['eta_model'][:,i],ls='-')
-            axts.plot(self.history['t'],
-                      self.history['eta_ana'][:,i],ls='--',color=l[0].get_color())
-        
-        
-        return fig
-
+            l=self.axts.plot(self.history['t'],
+                             self.history['eta_model'][:,i],ls='-')
+            self.axts.plot(self.history['t'],
+                           self.history['eta_ana'][:,i],ls='--',color=l[0].get_color())
+        return self.fig
 
 def test_2d_thacker_no_advection():
     """
@@ -249,7 +337,10 @@ def test_2d_thacker_no_advection():
     (hi, uj, tvol, ei) = sim.run(t_end=sim.period)
 
 if 1:
-    sim=Thacker2D(cg_tol=1e-10)
+    sim=Thacker2D(cg_tol=1e-10,sector_grid=True,sector_grid_N=41,
+                  max_subcells=1, max_subedges=1,fig_num=5,
+                  dt=112.5/1.0)
+    # sim.get_fu=sim.get_fu_no_adv
     sim.max_subcells=1
     sim.max_subedges=1
     sim.theta=0.55
@@ -265,10 +356,8 @@ if 1:
     plt.draw()
     plt.pause(0.01)
 
-    while sim.t<sim.period:
-        (_, uj, tvol, ei) = sim.run_until(sim.t+sim.dt)
-        #print("Max rms rel error: %.4f"%sim.max_rel_error)
-        fig=sim.snapshot_figure()
-        fig.canvas.draw()
-        fig.canvas.start_event_loop(0.01)
-        
+    while sim.t<10*sim.period:
+    (_, uj, tvol, ei) = sim.run_until(sim.t+40*sim.dt)
+    fig=sim.snapshot_figure(update=True)
+    fig.canvas.draw()
+    fig.canvas.start_event_loop(0.01)

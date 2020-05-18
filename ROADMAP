@@ -13,11 +13,8 @@ Add 2D test case (parabolic dish)
  - Added, but does not do well.
    Wetting front appears to lag significantly.
    -> Adjust history output locations to match scaled version of Zhang
-   -> Plot urad to see if there are obvious issues there (not likely).
    -> Run with/without advection, to understand if that makes a difference
-   -> Plot eta as discrete steps for easier visual debugging
-   -> Consider ways to adjust edge depths deeper, but maintain stability.
-      with the iterative scheme, maybe this becomes a nonissue?
+   -> Plot urad to see if there are obvious issues there (not likely).
 
 Change testing to py.test, as nose is apparently unmaintained
 

@@ -59,8 +59,10 @@ class SwampyCore(object):
     bc_Q_small_area=0.1
     # perot velocity calculations will clip the normalizing volume to
     # this lower bound (m3)
-    perot_small_volume=0.001
-    
+    # perot_small_volume=0.001
+    # instead clip to pi*perot_small_dz
+    perot_small_dz=1e-6
+
     def __init__(self,**kw):
         utils.set_keywords(self,kw)
         self.bcs=[]
@@ -89,14 +91,24 @@ class SwampyCore(object):
         if aj is None:
             aj=self.aj
 
+        if vi[i]==0.0:
+            # This should be checked somewhere, though possibly
+            # the responsibility of the caller?
+            # Somewhat overlapping with the perot_small_volume
+            # clip below.
+            return np.array([0,0])
+        
         for l in range(nsides):
             j = self.grd.cells[i]['edges'][l]
             #   m/s    m2 * m
             # => m^4/s
-            dest[:] += uj[j]*self.en[j,:] * self.aj[j] * self.dist[i, l]
+            dest[:] += uj[j]*self.en[j,:] * aj[j] * self.dist[i, l]
         # => m/s
-        dest /= max(vi[i],self.perot_small_volume)
+        dest /= max(vi[i],self.pi[i]*self.perot_small_dz)
 
+        # DBG
+        assert np.all(np.abs(dest)<1000)
+                      
         return dest
 
     def get_center_vel(self, uj):
@@ -121,42 +133,54 @@ class SwampyCore(object):
         Add to fu term, following Y Zhang sec 3.3.2
         Different from get_fu_orig in the older code.
         """
+        assert np.all(np.abs(fu)<1000)
+
+        ii=self.edge_to_cells_reflect
+
         Ui = self.get_center_vel(uj)
 
         # Zhang gives this as a linear interpolation,
         # but I think that's not going to be stable
         # velocity vector at faces. This will be the
-        # velocity that is advected
-        Uf = self.cell_to_edge_upwind(Ui,uj,tie='first')
-        #Uf = self.cell_to_edge_interp(Ui)
+        # velocity that is advected.
+        # tie='ei' so far makes no difference.  could use
+        # the simpler 'first'.
+        # Uf = self.cell_to_edge_upwind(Ui,uj,tie='ei')
+        # Uf = self.cell_to_edge_interp(Ui)
+        # Perot gives it as simple average:
+        Uf=0.5*(Ui[ii[:,0],:] + Ui[ii[:,1],:])
 
         # momentum flux at edges
-        flux=np.zeros((self.nedges,2),np.float64)
+        flux=np.zeros((self.nedges,2),np.float64) # [m3/s m/s]
         flux[self.intern]= (uj[:,None] * Uf * self.aj[:,None])[self.intern]
 
         # momentum flux in cells
         # Zhang 3.28
         # there u_f,n is an outward normal edge velocity
-        Mci=np.zeros((self.ncells,2),np.float64)
-        ii=self.edge_to_cells_reflect
+        Mci=np.zeros((self.ncells,2),np.float64) # [m3/s m/s]
         for j in self.intern:
-            # A positive uj is out of ii[:,0], into ii[:,1]
-            # Say Uf is [1,0]
-            # and uj[j] is 1.0
-            # Then flux>0
-            # Then this edge is carrying +x momentum *out* of
-            # ii[j,0], thus the first sign is negative, second
-            # is positive
             Mci[ii[j,0]] -= flux[j,:]
             Mci[ii[j,1]] += flux[j,:]
 
         # Normalize momentum fluxes in cell to du/dt
-        vfac=np.where(self.vi>0,1./self.vi,0)
-        Mci*=vfac[:,None]
-
-        du_dt_j = (self.cell_to_edge_interp(Mci) * self.en).sum(axis=1)
+        eps=1e-10
+        if 0:
+            vfac=np.where(self.vi>eps,1./self.vi.clip(eps),0)
+            Mci*=vfac[:,None] # [ m/s^2 ]
+            # This ends up unstable when wetting a cell.
+            Mci_interp=0.5*( Mci[ii[:,0]] + Mci[ii[:,1]]) # [m/s^2], (nedges,2)
+        else:
+            # volume average
+            Mci_sum=(Mci[ii[:,0]] + Mci[ii[:,1]])
+            v_sum=(self.vi[ii[:,0]] + self.vi[ii[:,1]]).clip(eps)[:,None]
+            Mci_interp=Mci_sum/v_sum
+        
+        du_dt_j = (Mci_interp * self.en).sum(axis=1)
+        
         fu[self.intern] += self.dt*du_dt_j[self.intern] * (self.aj[self.intern]>0)
 
+        # DBG
+        assert np.all(np.abs(fu)<1000)
         return fu
 
     def add_explicit_barotropic(self,ei,fu):
@@ -179,61 +203,61 @@ class SwampyCore(object):
 
         fu[self.intern] -= (gDtThetaCompl * wet_p * (ei[iRs] - ei[iLs]) / self.dc[:])[self.intern]
         
-    def get_fu_Perot(self, uj, alpha, sil, hi, hjbar, hjtilde, hjstar, fu):
-        """
-        Return fu term with Perot method.
-        """
-        ui = self.get_center_vel(uj)
-
-        # some parts can be vectorized
-        iLs=self.grd.edges['cells'][:,0]
-        iRs=self.grd.edges['cells'][:,1]
-
-        lhu=self.aj[:] * uj[:]
-
-        # FIX: blindly using calc_wetarea result pi instead of
-        # previous code that used self.area
-        cell_area=self.pi
-
-        for j in self.intern:
-            iL = iLs[j]
-            iR = iRs[j]
-
-            # Skip dry edges
-            # non-subgrid:
-            # if hjstar[j]<=0: continue
-            
-            # FIX: does this properly allow for wetting?  Not sure whether
-            # the goal is to even allow for mom-advection at wetting front.
-            # But code below assumes area of cells>0.
-            if ((cell_area[iL]==0.0)
-                or (cell_area[iR]==0.0)
-                or (self.aj[j]==0.0) ):
-                continue 
-
-            # code below uses hjbar, so better be sure it's nonzero,
-            # though not sure the code below is still correct w/subgrid
-            assert hjbar[j]>0
-            
-            # explicit barotropic moved out to separate function
-
-            for lr,iLR in [(0,iL),
-                           (1,iR)]:
-                nsides = self.ncsides[iLR]
-                sum1 = 0.
-                for l in range(nsides):
-                    k = self.grd.cells[iLR]['edges'][l]
-                    Q = sil[iL, l] * lhu[k] # lhu[k]==self.len[k] * hjstar[k] * uj[k] == self.aj * uj
-                    if Q >= 0.:  # ignore fluxes out of the cell
-                        continue
-                    iitmp = self.grd.edges[k]['cells']
-                    i2 = iitmp[self.sil_idx[iLR,l]]
-                    ui_norm = ui[i2, 0] * self.en[j, 0] + ui[i2, 1] * self.en[j, 1]
-                    sum1 += Q * (ui_norm - uj[j])
-                # in original code only difference is 2nd index to alpha
-                fu[j] -= self.dt * alpha[j, lr] * sum1 / (cell_area[iLR] * hjbar[j])
-
-        return fu
+    # def get_fu_Perot(self, uj, alpha, sil, hi, hjbar, hjtilde, hjstar, fu):
+    #     """
+    #     Return fu term with Perot method.
+    #     """
+    #     ui = self.get_center_vel(uj)
+    # 
+    #     # some parts can be vectorized
+    #     iLs=self.grd.edges['cells'][:,0]
+    #     iRs=self.grd.edges['cells'][:,1]
+    # 
+    #     lhu=self.aj[:] * uj[:]
+    # 
+    #     # FIX: blindly using calc_wetarea result pi instead of
+    #     # previous code that used self.area
+    #     cell_area=self.pi
+    # 
+    #     for j in self.intern:
+    #         iL = iLs[j]
+    #         iR = iRs[j]
+    # 
+    #         # Skip dry edges
+    #         # non-subgrid:
+    #         # if hjstar[j]<=0: continue
+    #         
+    #         # FIX: does this properly allow for wetting?  Not sure whether
+    #         # the goal is to even allow for mom-advection at wetting front.
+    #         # But code below assumes area of cells>0.
+    #         if ((cell_area[iL]==0.0)
+    #             or (cell_area[iR]==0.0)
+    #             or (self.aj[j]==0.0) ):
+    #             continue 
+    # 
+    #         # code below uses hjbar, so better be sure it's nonzero,
+    #         # though not sure the code below is still correct w/subgrid
+    #         assert hjbar[j]>0
+    #         
+    #         # explicit barotropic moved out to separate function
+    # 
+    #         for lr,iLR in [(0,iL),
+    #                        (1,iR)]:
+    #             nsides = self.ncsides[iLR]
+    #             sum1 = 0.
+    #             for l in range(nsides):
+    #                 k = self.grd.cells[iLR]['edges'][l]
+    #                 Q = sil[iL, l] * lhu[k] # lhu[k]==self.len[k] * hjstar[k] * uj[k] == self.aj * uj
+    #                 if Q >= 0.:  # ignore fluxes out of the cell
+    #                     continue
+    #                 iitmp = self.grd.edges[k]['cells']
+    #                 i2 = iitmp[self.sil_idx[iLR,l]]
+    #                 ui_norm = ui[i2, 0] * self.en[j, 0] + ui[i2, 1] * self.en[j, 1]
+    #                 sum1 += Q * (ui_norm - uj[j])
+    #             # in original code only difference is 2nd index to alpha
+    #             fu[j] -= self.dt * alpha[j, lr] * sum1 / (cell_area[iLR] * hjbar[j])
+    # 
+    #     return fu
 
     # def calc_phi(r, limiter):
     #     """
@@ -248,26 +272,36 @@ class SwampyCore(object):
     # 
     #     return phi
 
-    def cell_to_edge_upwind(self, cell_data, u_j, tie='max'):
+    def cell_to_edge_upwind(self, cell_data, u_j, tie='max', return_i=False):
         """
         Upwind a cell-centered value on edges based on the velocity u_j.
          tie: 'max' For u_j==0 choose the greater of cell_data.
+              'first' Arbitrary
+              'ei' Choose cell with greater self.ei (eta)
+         return_i: return the corresponding cell index, too.
         """
         ii = self.edge_to_cells_reflect
         sel=(u_j>0).astype(np.int32)
-        while sel.ndim < cell_data.ndim:
-            sel=sel[...,None]
-        #e_data = np.where( u_j>0, cell_data[ii[:,0]], cell_data[ii[:,1]] )
-        e_data=sel*cell_data[ii[:,0]] + (1-sel)*cell_data[ii[:,1]]
         ties=(u_j==0.0)
         if tie=='max':
-            e_data[ties] = np.maximum( cell_data[ii[ties,0]],
-                                       cell_data[ii[ties,1]] )
+            sel[ties] = cell_data[ii[ties,0]] > cell_data[ii[ties,1]]
+        elif tie=='ei':
+            sel[ties] = self.ei[ii[ties,0]] > self.ei[ii[ties,1]]
         elif tie=='first':
             pass
         else:
             raise Exception("Need to add support for other tie mechanisms")
-        return e_data
+
+        up_i=ii[np.arange(self.nedges),1-sel]
+        
+        while sel.ndim < cell_data.ndim:
+            sel=sel[...,None]
+        #e_data=sel*cell_data[ii[:,0]] + (1-sel)*cell_data[ii[:,1]]
+        e_data=cell_data[up_i]
+        if return_i:
+            return e_data, up_i
+        else:
+            return e_data
 
     def cell_to_edge_interp(self,cell_data):
         ii=self.edge_to_cells_reflect
@@ -380,9 +414,6 @@ class SwampyCore(object):
         Subgrid puts the onus of proper edge bathy on the user, rather
         than defaulting to shallower zi.
         """
-        # non-subgrid:
-        # return self.len * (self.zj + eta_j).clip(0.0)
-
         # subgrid information for cells is a list of elevation and corresponding area.
         # the slow but clear way:
         Aj=np.zeros(self.nedges,np.float64)
@@ -434,7 +465,7 @@ class SwampyCore(object):
         self.grd.update_cell_nodes()
         self.grd.edge_to_cells()
         self.grd.cells_area()
-        self.grd.cells['_center'] = self.grd.cells_centroid()
+        self.grd.cells['_center'] = self.grd.cells_center()
         self.grd.edges['mark'] = 0  # default is internal cell
         self.extern = np.where(np.min(self.grd.edges['cells'], axis=1) < 0)[0]
         self.grd.edges['mark'][self.extern] = 1  # boundary edge
@@ -508,16 +539,14 @@ class SwampyCore(object):
 
         calculated as euclidean distance
         """
-        self.dcj=np.zeros((self.nedges,2),np.float64)
-
         ii=self.edge_to_cells_reflect
         cc=self.grd.cells_center()
 
         # this implies some decisions about how to handle non
         # orthogonal cells. could calculate edge-normal signed
         # distance, with or without clipping,
-        dcj=utils.dist( self.exy[:,None,:]-cc[ii] )
-        self.dc=dcj.sum(axis=1)
+        self.dcj=utils.dist( self.exy[:,None,:]-cc[ii] )
+        self.dc=self.dcj.sum(axis=1)
 
         dist = np.zeros((self.ncells, max_sides), np.float64)
         for i in range(self.ncells):
@@ -527,7 +556,7 @@ class SwampyCore(object):
 
         self.dist=dist
         self.alpha=0.5*np.zeros( (self.nedges,2), np.float64 )
-        self.alpha[self.intern,:] = dcj[self.intern]/self.dc[self.intern,None]
+        self.alpha[self.intern,:] = self.dcj[self.intern]/self.dc[self.intern,None]
         assert np.all(self.dc[self.intern]>0)
 
     def get_sign_array(self):
@@ -540,6 +569,7 @@ class SwampyCore(object):
             for l in range(self.ncsides[i]):
                 j = self.grd.cells[i]['edges'][l]
                 ii = self.grd.edges[j]['cells']  # 2 cells
+                assert ii[1]!=ii[0]
                 sil[i, l] = (ii[1] - 2 * i + ii[0]) / (ii[1] - ii[0])
 
         # for indexing -- just 0,1
@@ -708,9 +738,9 @@ class SwampyCore(object):
         """
         self.vi[:] = self.calc_volume(ei)
         self.pi[:] = self.calc_wetarea(ei)
-
+        
         eta_j=self.cell_to_edge_upwind(cell_data=ei,
-                                       u_j=uj,tie='max')
+                                      u_j=uj,tie='max')
         self.aj[:] = self.calc_edge_wetarea(eta_j)
         self.cf[:] = self.calc_edge_friction(uj, self.aj, self.aj/self.len)
         self.cfterm[:] = 1. / (1. + self.dt * self.cf[:])
@@ -742,7 +772,7 @@ class SwampyCore(object):
             self.t+=dt # update model time
             t_step_end=self.t
             
-            log.info('step %d/%d  t=%.3fs'%(n+1,n_steps,self.t))
+            log.debug('step %d/%d  t=%.3fs'%(n+1,n_steps,self.t))
 
             self.update_bcs(t_step_start,t_step_end)
             eta_bc_mask=np.zeros(self.ncells,np.bool8)
@@ -755,12 +785,17 @@ class SwampyCore(object):
             fu=np.zeros_like(uj)
             fu[self.intern]=uj[self.intern]
             fu[self.aj<=0]=0.0
+
+            fu_start=fu.copy()
             
             self.add_explicit_barotropic(ei=ei,fu=fu)
+            self.fu_barotropic=fu - fu_start
+            
             # shouldn't happen, but check to be sure
             assert np.all( fu[self.aj==0.0]==0.0 )
             
             self.get_fu(uj,fu=fu)
+            self.fu_adv = fu-self.fu_barotropic
             
             # get_fu should avoid this, but check to be sure
             assert np.all( fu[self.aj==0.0]==0.0 )
@@ -923,7 +958,7 @@ class SwampyCore(object):
                 uj[j] = self.cfterm[j] * (fu[j] - term * wet_p)
 
             # DBG: temporary check
-            assert np.abs(self.uj).max() < 20.0
+            assert np.abs(self.uj).max() < 1000.0
 
             self.update_geometry(ei=self.ei,uj=self.uj)
 

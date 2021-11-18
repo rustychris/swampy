@@ -532,7 +532,7 @@ class SWAMPpy(object):
 
         # compute topology using unstructured_grid class methods
         self.set_topology(grid_type)
-        print 'ncells', self.ncells
+        print('ncells', self.ncells)
 
         return
 
@@ -662,7 +662,7 @@ class SWAMPpy(object):
 
         # time stepping loop
         for n in range(nsteps):
-            print 'step', n + 1, 'of', nsteps
+            print('step', n + 1, 'of', nsteps)
 
             # calculate advection term
             fu = self.get_fu_Perot(uj, alpha, sil, hi, hjstar, hjbar, hjtilde)
@@ -716,9 +716,10 @@ class SWAMPpy(object):
 
                 # invert matrix
                 start = time.time()
-                ei_corr, success = sparse.linalg.cg(Ao, bo, x0=x0, tol=1.e-16)  # Increase tolerance for faster speed
+                # Increase tolerance for faster speed, and for dam break, 1e-16 was not achievable
+                ei_corr, success = sparse.linalg.cg(Ao, bo, x0=x0, tol=1.e-12) 
                 end = time.time()
-                print 'matrix solve took', '{0:0.4f}'.format(end - start), 'sec'
+                print( 'matrix solve took', '{0:0.4f}'.format(end - start), 'sec')
                 if success != 0:
                     raise RuntimeError('Error in convergence of conj grad solver')
 
@@ -733,10 +734,10 @@ class SWAMPpy(object):
             # substitute back into u solution
             for j in self.intern:  # loop over internal cells
                 ii = self.grd.edges[j]['cells']  # 2 cells
-#                 if hjbar[j] > dzmin:
-#                     hterm = hjtilde[j] / hjbar[j]
-#                 else:
-#                     hterm = 1.0
+                # if hjbar[j] > dzmin:
+                #     hterm = hjtilde[j] / hjbar[j]
+                # else:
+                #     hterm = 1.0
                 hterm = 1.0
                 term = g * dt * self.theta * (ei[ii[1]] - ei[ii[0]]) / dc[j]
                 uj[j] = cfterm[j] * (fu[j] - term * hterm)
@@ -917,11 +918,11 @@ def get_bump_observed():
         y.append(float(sline[1]))
     return (np.array(x), np.array(y))
 
+##   
 
 if __name__ == '__main__':
-
-    case = 'U-chan'  # dam_break , bump , U-chan
-
+    case='dam_break' # dam_break , bump , U-chan
+    
     # Flow over rounded bump test case
     if case == 'bump':
         dx = 0.05 * m2ft
@@ -973,7 +974,6 @@ if __name__ == '__main__':
     (xc, ec) = swampy.get_xsect_avg_val(ei)
 
     if case == 'dam_break':
-
         # dry dam break analytical solution
         (xan, han, uan) = get_dry_dam_break_analytical_soln(domain_length, upstream_height, tend)
 
@@ -1004,12 +1004,13 @@ if __name__ == '__main__':
         ax.plot(swampy.grd.cells['_center'][:, 0], -swampy.ic_zi, 'k-', zorder=5)
         ax.grid(color='0.8', linestyle='-', zorder=3)
         ax.set_ylabel('Water Surface Elevation, m')
-#         ax.set_ylim([-1.2, 1.2])
+        # ax.set_ylim([-1.2, 1.2])
         ax.legend(loc='center left')
 
     elif 'U-chan' in case:
-
-        print 'Complete'
+        print('Complete')
 
     plt.show()
-    print 'Complete!'
+    print('Complete!')
+
+

@@ -11,7 +11,7 @@ Created on Fri 24 Mar 2018
 """
 
 import time
-
+import pdb
 import h5py
 from matplotlib.collections import PolyCollection
 from scipy.spatial.distance import euclidean
@@ -31,7 +31,8 @@ g = 9.8 * m2ft  # gravity
 
 
 class SWAMPpy(object):
-
+    advection=True
+    
     def __init__(self, dx, dt, theta, ManN):
         self.dx = dx
         self.dt = dt
@@ -77,7 +78,7 @@ class SWAMPpy(object):
         """
         fu = np.zeros_like(uj)
         ui = self.get_center_vel(uj)
-#         self.write_ui(ui)
+        # self.write_ui(ui)
         gDtThetaCompl = g * self.dt * (1.0 - self.theta)
         for j in self.intern:
             ii = self.grd.edges[j]['cells']
@@ -90,6 +91,9 @@ class SWAMPpy(object):
             else:
                 fu[j] -= gDtThetaCompl * hjtilde[j] / hjbar[j] * (hi[iR] - hi[iL]) / self.dc[j]
 
+            if not self.advection:
+                continue
+            
             if hjbar[j] < dzmin:  # no advection term if no water at a cell edge
                 continue
 
@@ -509,14 +513,7 @@ class SWAMPpy(object):
         """
         self.domain_length = domain_length
         self.grid_type = grid_type
-        if 'dam_break' in case:
-            if grid_type == '1D_Cartesian':
-                self.make_1D_grid_Cartesian(domain_length, show_grid=show_grid)
-            elif grid_type == '2D_Cartesian':
-                self.make_2D_grid_Cartesian(domain_length, show_grid=show_grid)
-            else:
-                raise NotImplementedError('Grid type ' + grid_type + ' not supported for this test case')
-        elif 'bump' in case:
+        if ('dam_break' in case) or ('hunter' in case) or ('bump' in case):
             if grid_type == '1D_Cartesian':
                 self.make_1D_grid_Cartesian(domain_length, show_grid=show_grid)
             elif grid_type == '2D_Cartesian':
@@ -569,6 +566,12 @@ class SWAMPpy(object):
                 if xtmp >= 8.*m2ft and xtmp <= 12.*m2ft:
                     self.ic_zi[i] = -(0.2 - 0.05 * (xtmp - 10.) ** 2) * m2ft
 
+        elif 'hunter' in case:
+            self.ds_eta = ds_eta # should be 0 generally
+            self.ic_ei[:] = ds_eta
+            self.us_i = np.where(self.grd.cells['_center'][:, 0] < (0. + self.dx))[0]
+            # Could give the boundary as inflow or as stage, and wet the first cell
+                    
         # set initial conditions - U channel
         elif 'U-chan' in case:
             self.ds_eta = ds_eta
@@ -616,7 +619,7 @@ class SWAMPpy(object):
         """
         dt = self.dt
         self.tend = tend
-        nsteps = np.int(np.round(tend / dt))
+        nsteps = int(np.round(tend / dt))
         xy = self.get_grid_poly_collection()
 
         # precompute constants
@@ -666,10 +669,10 @@ class SWAMPpy(object):
 
             # calculate advection term
             fu = self.get_fu_Perot(uj, alpha, sil, hi, hjstar, hjbar, hjtilde)
-#             self.write_fu(fu)
-#             self.write_facedist()
-#             self.write_centroid()
-#             self.write_len()
+            # self.write_fu(fu)
+            # self.write_facedist()
+            # self.write_centroid()
+            # self.write_len()
 
             # set matrix coefficients
             # first calculate *usual* coefficient matrix and rhs
@@ -704,7 +707,7 @@ class SWAMPpy(object):
                 for i in range(ncells):
                     bo[i] = vi[i] + np.dot(Ai[i, :], ei[:]) - bi[i]
 
-                if 'bump' in case or 'U-chan' in case:
+                if ('bump' in case) or ('U-chan' in case):
                     for idx in range(len(self.ds_i)):
                         i = self.ds_i[idx]
                         Ao[i, :] = 0.
@@ -713,16 +716,30 @@ class SWAMPpy(object):
                     for idx in range(len(self.us_i)):
                         i = self.us_i[idx]
                         bo[i] = bo[i] - dt * self.qinflow * self.us_jlen[idx]
+                elif 'hunter' in case:
+                    # No correction, and set the elevation outside this loop
+                    bo[self.us_i]=0.0
 
-                # invert matrix
-                start = time.time()
-                # Increase tolerance for faster speed, and for dam break, 1e-16 was not achievable
-                ei_corr, success = sparse.linalg.cg(Ao, bo, x0=x0, tol=1.e-12) 
-                end = time.time()
-                print( 'matrix solve took', '{0:0.4f}'.format(end - start), 'sec')
-                if success != 0:
-                    raise RuntimeError('Error in convergence of conj grad solver')
-
+                if theta>0.0:
+                    # invert matrix
+                    start = time.time()
+                    # Increase tolerance for faster speed, and for dam break, 1e-16 was not achievable
+                    iter_count=0
+                    def incr(xk):
+                        nonlocal iter_count
+                        iter_count+=1
+                    ei_corr, success = sparse.linalg.cg(Ao, bo, x0=x0, tol=1.e-12,callback=incr) 
+                    end = time.time()
+                    print(f'matrix solve took {end-start:0.4f} sec  {iter_count} iterations')
+                    if success != 0:
+                        raise RuntimeError('Error in convergence of conj grad solver')
+                else:
+                    dia=np.diag(Ao)
+                    # Make sure Ao is diagonal
+                    assert np.all( Ao-np.diag(dia) == 0 )
+                    assert np.all(dia!=0.0)
+                    ei_corr=bo/dia
+                    
                 ei = ei - ei_corr
                 hi = zi + ei
                 pi = self.calc_wetarea(hi)
@@ -742,6 +759,11 @@ class SWAMPpy(object):
                 term = g * dt * self.theta * (ei[ii[1]] - ei[ii[0]]) / dc[j]
                 uj[j] = cfterm[j] * (fu[j] - term * hterm)
 
+            # Update stage BC:
+            if 'hunter' in case:
+                t=n*dt
+                u_bc=1.0
+                ei[self.us_i]=(7./3*ManN**2*u_bc**3*t)**(3./7)
             # Update elevations
             hjstar = self.calc_hjstar(ei, zi, uj)
             hjbar = self.calc_hjbar(ei, zi)
@@ -878,7 +900,7 @@ def get_dry_dam_break_analytical_soln(domain_length, upstream_height, tend):
     sgh = np.sqrt(g * upstream_height)
     xA = x0 - t * sgh
     xB = x0 + 2.0 * t * sgh
-    imx = np.int(domain_length / dx)
+    imx = int(domain_length / dx)
     xj = np.asarray([dx * float(i) for i in range(imx + 1)])
     xi = 0.5 * (xj[:-1] + xj[1:])
     han = np.zeros(imx, np.float64)
@@ -895,6 +917,20 @@ def get_dry_dam_break_analytical_soln(domain_length, upstream_height, tend):
             xt = xi[i] - x0
             han[i] = (4.0 / (9.0 * g)) * (sgh - xt / (2.0 * t)) ** 2
             uan[i] = (2.0 / 3.0) * (xt / t + sgh)
+
+    return (xi, han, uan)
+
+def get_dry_flood_bore_analytical_soln(domain_length, upstream_height, tend):
+    """
+    Return x, h, u for analytical dry dam break solution
+    dx here just applies to resolution of analytical solution
+    """
+    dx = 1.0
+    u=1.0
+
+    xi=dx*(np.arange(int(domain_length/dx))+0.5)
+    han=(-7/3*ManN**2*u**2*(xi-u*tend)).clip(0)**(3./7)
+    uan=np.where(han>0,u,0.0)
 
     return (xi, han, uan)
 
@@ -920,8 +956,8 @@ def get_bump_observed():
 
 ##   
 
-if __name__ == '__main__':
-    case='dam_break' # dam_break , bump , U-chan
+if 1: # __name__ == '__main__':
+    case='hunter' # hunter, dam_break , bump , U-chan
     
     # Flow over rounded bump test case
     if case == 'bump':
@@ -945,6 +981,36 @@ if __name__ == '__main__':
         grid_type = '2D_Cartesian'  # 1D_Cartesian, 2D_Cartesian
         upstream_height = 10.0
         downstream_height = 0.
+    elif case == 'hunter':
+        if 0:
+            # with dt=5.0, by t=1440 cg is taking 25 iterations
+            #      dt=10     ...                  58 iterations
+            #      dt=12                          70 iterations
+            #      dt=15                          80 iterations
+            #      dt=20       not stable
+            dx = 25.0
+            dt = 12.5
+            tend = 65*60
+            domain_length = 5000.0
+            theta = 1.0
+        else: # explicit test:
+            dx = 25.0
+            # max celerity at tend=360 is 3.33m/s
+            # stable with dt=3, but not 4.0
+            # max celerity at tend=720 3.87 m/s
+            # stable with dt=2.25, just unstable at dt=2.5
+            # by tend=1440, max celerity is 4.49 m/s,
+            # stable at ... 1.5
+            # 3900s: in 2D, requires 0.8 or so.
+            #        in 1D, pretty much the same
+            dt = 0.6 # without advection, need a bit shorter.
+            tend = 65*60 # 
+            domain_length = 5000.0
+            theta = 0.0
+        ManN = 0.04
+        grid_type = '2D_Cartesian'  # 1D_Cartesian, 2D_Cartesian
+        upstream_height = 0.0
+        downstream_height = 0.
     elif case == 'U-chan':
         dx = 0.05
         dt = 0.01
@@ -958,10 +1024,12 @@ if __name__ == '__main__':
 
     # Initialize, set grid, set ICs
     swampy = SWAMPpy(dx, dt, theta, ManN)
+    swampy.advection=False
+    
     swampy.set_grid(case, domain_length=domain_length, grid_type=grid_type, show_grid=False)
     if 'bump' in case or 'U-chan' in case:
         swampy.set_initial_conditions(case, ds_eta=downstream_eta, us_q=upstream_flow)
-    elif case == 'dam_break':
+    elif ('dam_break' in case) or ('hunter' in case):
         swampy.set_initial_conditions(case, us_eta=upstream_height, ds_eta=downstream_height)
 
     # Run
@@ -976,6 +1044,24 @@ if __name__ == '__main__':
     if case == 'dam_break':
         # dry dam break analytical solution
         (xan, han, uan) = get_dry_dam_break_analytical_soln(domain_length, upstream_height, tend)
+
+        # Analytical comparison plot
+        fig = plt.figure()
+        ax1 = fig.add_subplot(211)
+        ax1.plot(xan, han, '-b', label='analytical', linewidth=1.5)
+        ax1.plot(xc, ec, 'r.', ms=2, label='model')
+        ax1.set_ylabel('Depth (m)')
+        ax1.legend(loc='upper right')
+        ax2 = fig.add_subplot(212)
+        ax2.plot(xan, uan, '-b', label='analytical', linewidth=1.5)
+        ax2.plot(xc, uxc, 'r.', ms=2, label='model')
+        ax2.set_ylabel('Current Velocity (m/s)')
+        ax2.set_xlabel('Distance (m)')
+        ax2.legend(loc='upper left')
+        
+    if case == 'hunter':
+        # dry flood bore analytical solution
+        (xan, han, uan) = get_dry_flood_bore_analytical_soln(domain_length, upstream_height, tend)
 
         # Analytical comparison plot
         fig = plt.figure()
